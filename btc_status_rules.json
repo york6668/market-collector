@@ -1,0 +1,435 @@
+{
+  "schema": "btc_status_rules",
+  "revision": 3,
+  "status_layers": [
+    {
+      "key": "rate_environment",
+      "label": "利率环境",
+      "inputs": ["macro.us10y", "macro.real_yield_10y"],
+      "min_required": 2,
+      "insufficient_label": "数据不足",
+      "score_rules": [
+        {"metric": "macro.us10y", "op": "lt", "value": 3.7, "score": -1},
+        {"metric": "macro.us10y", "op": "gte", "value": 4.2, "score": 1},
+        {"metric": "macro.us10y", "op": "gte", "value": 4.7, "score": 1},
+        {"metric": "macro.real_yield_10y", "op": "lt", "value": 1.5, "score": -1},
+        {"metric": "macro.real_yield_10y", "op": "gte", "value": 2.0, "score": 1},
+        {"metric": "macro.real_yield_10y", "op": "gte", "value": 2.5, "score": 1}
+      ],
+      "statuses": [
+        {"label": "宽松", "max": -1},
+        {"label": "中性", "min": 0, "max": 1},
+        {"label": "偏高", "min": 2, "max": 3},
+        {"label": "高压", "min": 4}
+      ]
+    },
+    {
+      "key": "long_term_liquidity",
+      "label": "长期流动性",
+      "inputs": [
+        "macro.m2_yoy_pct",
+        "macro.m2_yoy_two_month_rising_rule",
+        "macro.fed_balance_sheet_30d_pct",
+        "macro.treasury_buyback_recent_count",
+        "macro.treasury_buyback_total_par_accepted"
+      ],
+      "min_required": 3,
+      "insufficient_label": "数据不足",
+      "score_rules": [
+        {"metric": "macro.m2_yoy_pct", "op": "gte", "value": 3.0, "score": 2},
+        {"metric": "macro.m2_yoy_pct", "op": "gte", "value": 0.0, "score": 1},
+        {"metric": "macro.m2_yoy_pct", "op": "lt", "value": 0.0, "score": -1},
+        {"metric": "macro.m2_yoy_two_month_rising_rule", "op": "eq", "value": true, "score": 1},
+        {"metric": "macro.fed_balance_sheet_30d_pct", "op": "gt", "value": 0.0, "score": 2},
+        {"metric": "macro.fed_balance_sheet_30d_pct", "op": "gte", "value": -0.1, "score": 1},
+        {"metric": "macro.fed_balance_sheet_30d_pct", "op": "lt", "value": -0.3, "score": -1},
+        {"metric": "macro.treasury_buyback_total_par_accepted", "op": "gte", "value": 5000000000, "score": 2},
+        {"metric": "macro.treasury_buyback_total_par_accepted", "op": "gte", "value": 2000000000, "score": 1},
+        {"metric": "macro.treasury_buyback_recent_count", "op": "gte", "value": 1, "score": 1}
+      ],
+      "statuses": [
+        {"label": "收紧", "max": -2},
+        {"label": "中性偏收紧", "min": -1, "max": 0},
+        {"label": "中性", "min": 1, "max": 2},
+        {"label": "中性偏改善", "min": 3, "max": 4},
+        {"label": "改善", "min": 5}
+      ]
+    },
+    {
+      "key": "etf_funds",
+      "label": "ETF资金",
+      "inputs": ["etf.flow_1d_usd", "etf.flow_5d_usd", "etf.flow_30d_usd"],
+      "min_required": 2,
+      "insufficient_label": "数据不足",
+      "match_rules": [
+        {
+          "label": "持续流入",
+          "when": {
+            "all": [
+              {"metric": "etf.flow_1d_usd", "op": "gt", "value": 0},
+              {"metric": "etf.flow_5d_usd", "op": "gt", "value": 0},
+              {"metric": "etf.flow_30d_usd", "op": "gt", "value": 0}
+            ]
+          }
+        },
+        {
+          "label": "短期回流",
+          "when": {
+            "all": [
+              {"metric": "etf.flow_1d_usd", "op": "gt", "value": 0},
+              {
+                "any": [
+                  {"metric": "etf.flow_5d_usd", "op": "lte", "value": 0},
+                  {"metric": "etf.flow_30d_usd", "op": "lte", "value": 0}
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "label": "持续流出",
+          "when": {
+            "any": [
+              {
+                "all": [
+                  {"metric": "etf.flow_5d_usd", "op": "lt", "value": 0},
+                  {"metric": "etf.flow_30d_usd", "op": "lt", "value": 0}
+                ]
+              },
+              {
+                "all": [
+                  {"metric": "etf.flow_1d_usd", "op": "lt", "value": 0},
+                  {"metric": "etf.flow_5d_usd", "op": "lt", "value": 0}
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "score_rules": [
+        {"metric": "etf.flow_1d_usd", "op": "gt", "value": 0, "score": 1},
+        {"metric": "etf.flow_1d_usd", "op": "lt", "value": 0, "score": -1},
+        {"metric": "etf.flow_5d_usd", "op": "gt", "value": 0, "score": 2},
+        {"metric": "etf.flow_5d_usd", "op": "lt", "value": 0, "score": -2},
+        {"metric": "etf.flow_30d_usd", "op": "gt", "value": 0, "score": 2},
+        {"metric": "etf.flow_30d_usd", "op": "lt", "value": 0, "score": -2}
+      ],
+      "statuses": [
+        {"label": "持续流出", "max": -1},
+        {"label": "中性", "min": 0, "max": 0},
+        {"label": "短期回流", "min": 1, "max": 3},
+        {"label": "持续流入", "min": 4}
+      ]
+    },
+    {
+      "key": "leverage_environment",
+      "label": "杠杆环境",
+      "inputs": [
+        "leverage.oi_4h_pct",
+        "leverage.oi_24h_pct",
+        "leverage.oi_72h_pct",
+        "leverage.funding_8h_pct",
+        "leverage.funding_24h_pct",
+        "leverage.basis_pct"
+      ],
+      "min_required": 3,
+      "insufficient_label": "数据不足",
+      "match_rules": [
+        {
+          "label": "空头杠杆扩张",
+          "when": {"metric": "leverage.status", "op": "eq", "value": "short_attack"}
+        },
+        {
+          "label": "短线降温，72H累计仍高",
+          "when": {
+            "all": [
+              {"metric": "leverage.oi_short_term_status", "op": "eq", "value": "contraction"},
+              {"metric": "leverage.oi_72h_context", "op": "eq", "value": "accumulating"}
+            ]
+          }
+        },
+        {
+          "label": "降温",
+          "when": {"metric": "leverage.oi_short_term_status", "op": "eq", "value": "contraction"}
+        },
+        {
+          "label": "方向分化",
+          "when": {"metric": "leverage.oi_short_term_status", "op": "eq", "value": "mixed"}
+        },
+        {
+          "label": "短线回升，72H累计仍低",
+          "when": {
+            "all": [
+              {"metric": "leverage.oi_short_term_status", "op": "eq", "value": "expansion"},
+              {"metric": "leverage.oi_72h_context", "op": "eq", "value": "declining"}
+            ]
+          }
+        },
+        {
+          "label": "增强",
+          "when": {"metric": "leverage.oi_short_term_status", "op": "eq", "value": "expansion"}
+        }
+      ],
+      "score_rules": [
+        {"metric": "leverage.oi_4h_pct", "op": "gte", "value": 1.0, "score": 1},
+        {"metric": "leverage.oi_24h_pct", "op": "gte", "value": 1.5, "score": 1},
+        {"metric": "leverage.oi_72h_pct", "op": "gt", "value": 0.0, "score": 1},
+        {"metric": "leverage.oi_4h_pct", "op": "lte", "value": -1.0, "score": -1},
+        {"metric": "leverage.oi_24h_pct", "op": "lte", "value": -1.5, "score": -1},
+        {"metric": "leverage.oi_72h_pct", "op": "lt", "value": 0.0, "score": -1},
+        {"metric": "leverage.funding_8h_pct", "op": "gt", "value": 0.01, "score": 1},
+        {"metric": "leverage.funding_8h_pct", "op": "lt", "value": -0.05, "score": -1},
+        {"metric": "leverage.basis_pct", "op": "gt", "value": 0.1, "score": 1},
+        {"metric": "leverage.basis_pct", "op": "lt", "value": -0.1, "score": -1}
+      ],
+      "statuses": [
+        {"label": "降温", "max": -2},
+        {"label": "稳定", "min": -1, "max": 1},
+        {"label": "增强", "min": 2}
+      ]
+    },
+    {
+      "key": "spot_funds",
+      "label": "现货资金",
+      "inputs": [
+        "spot.cvd_4h_pct",
+        "spot.cvd_24h_pct",
+        "spot.stablecoin_24h_usd",
+        "spot.stablecoin_7d_usd",
+        "etf.flow_5d_usd",
+        "etf.flow_30d_usd"
+      ],
+      "min_required": 3,
+      "insufficient_label": "数据不足",
+      "score_rules": [
+        {"metric": "spot.cvd_4h_pct", "op": "gt", "value": 0.0, "score": 1},
+        {"metric": "spot.cvd_4h_pct", "op": "lt", "value": 0.0, "score": -1},
+        {"metric": "spot.cvd_24h_pct", "op": "gt", "value": 0.0, "score": 1},
+        {"metric": "spot.cvd_24h_pct", "op": "lt", "value": 0.0, "score": -1},
+        {"metric": "spot.stablecoin_24h_usd", "op": "gt", "value": 100000000.0, "score": 1},
+        {"metric": "spot.stablecoin_24h_usd", "op": "lt", "value": -100000000.0, "score": -1},
+        {"metric": "spot.stablecoin_7d_usd", "op": "gt", "value": 100000000.0, "score": 2},
+        {"metric": "spot.stablecoin_7d_usd", "op": "lt", "value": -100000000.0, "score": -2},
+        {"metric": "etf.flow_5d_usd", "op": "gt", "value": 0.0, "score": 1},
+        {"metric": "etf.flow_5d_usd", "op": "lt", "value": 0.0, "score": -1},
+        {"metric": "etf.flow_30d_usd", "op": "gt", "value": 0.0, "score": 1},
+        {"metric": "etf.flow_30d_usd", "op": "lt", "value": 0.0, "score": -1}
+      ],
+      "statuses": [
+        {"label": "减弱", "max": -2},
+        {"label": "稳定", "min": -1, "max": 2},
+        {"label": "增强", "min": 3}
+      ]
+    }
+  ],
+  "market_patterns": {
+    "schema": "btc_market_patterns",
+    "revision": 5,
+    "history_hours": 12,
+    "event_active_hours": 4,
+    "structure_scan_hours": 12,
+    "support_candidate_timeout_hours": 3,
+    "pressure_candidate_timeout_hours": 2,
+    "range_confirm_hours": 3,
+    "resistance_stall_confirm_hours": 2,
+    "resistance_stall_scan_hours": 6,
+    "resistance_stall_max_progress_pct": 0.15,
+    "resistance_stall_min_spot_cvd_pct": 1.0,
+    "resistance_stall_min_spot_volume_change_pct": 30.0,
+    "groups": [
+      {"key": "price_oi", "label": "价格与合约仓位（过去4小时）", "exclusive": true},
+      {"key": "spot_flow", "label": "Binance现货主动成交（过去4小时）", "exclusive": true},
+      {"key": "key_level_event", "label": "关键价位事件（最近4小时）", "exclusive": false},
+      {"key": "activity_state", "label": "连续状态", "exclusive": false}
+    ],
+    "patterns": [
+      {
+        "key": "deleveraging_down",
+        "label": "价格下跌，未平仓合约量明显减少",
+        "surface_bias_on_confirmation": "negative",
+        "surface_bias_horizon": "current_window",
+        "category": "price_oi",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars and OI contracts",
+        "interpretation_limit": "仅凭价格和未平仓合约量变化，无法确认关闭的是看涨仓位还是看跌仓位",
+        "kind": "snapshot",
+        "required_all": ["price.change_4h_pct", "derivatives.oi_change_4h_pct"],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "lte", "value": -0.5},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "lte", "value": -1.0}
+          ]
+        }
+      },
+      {
+        "key": "new_short_pressure",
+        "label": "价格下跌，未平仓合约量明显增加",
+        "surface_bias_on_confirmation": "negative",
+        "surface_bias_horizon": "current_window",
+        "category": "price_oi",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars and OI contracts",
+        "interpretation_limit": "未平仓合约量增加，不能单独证明增加的仓位都在看跌",
+        "kind": "snapshot",
+        "required_all": ["price.change_4h_pct", "derivatives.oi_change_4h_pct"],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "lte", "value": -0.5},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "gte", "value": 1.0}
+          ]
+        }
+      },
+      {
+        "key": "leveraged_long_rise",
+        "label": "价格上涨，未平仓合约量明显增加",
+        "surface_bias_on_confirmation": "positive",
+        "surface_bias_horizon": "current_window",
+        "category": "price_oi",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars and OI contracts",
+        "interpretation_limit": "未平仓合约量增加，不能单独证明增加的仓位都在看涨",
+        "kind": "snapshot",
+        "required_all": ["price.change_4h_pct", "derivatives.oi_change_4h_pct"],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "gte", "value": 0.5},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "gte", "value": 1.0}
+          ]
+        }
+      },
+      {
+        "key": "short_covering_rise",
+        "label": "价格上涨，未平仓合约量明显减少",
+        "surface_bias_on_confirmation": "positive",
+        "surface_bias_horizon": "current_window",
+        "category": "price_oi",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars and OI contracts",
+        "interpretation_limit": "未平仓合约量减少，不能单独证明关闭的仓位都在看跌",
+        "kind": "snapshot",
+        "required_all": ["price.change_4h_pct", "derivatives.oi_change_4h_pct"],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "gte", "value": 0.5},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "lte", "value": -1.0}
+          ]
+        }
+      },
+      {
+        "key": "spot_led_rise",
+        "label": "价格上涨，Binance 现货主动买入明显多于卖出，成交额增加，但未平仓合约量没有明显增加",
+        "surface_bias_on_confirmation": "positive",
+        "surface_bias_horizon": "current_window",
+        "category": "spot_flow",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual price/OI and Binance Spot BTCUSDT taker-flow proxy",
+        "interpretation_limit": "只证明上涨与 Binance 现货主动买入同时出现，不能证明现货是上涨的主要原因",
+        "kind": "snapshot",
+        "required_all": [
+          "price.change_4h_pct",
+          "derivatives.oi_change_4h_pct",
+          "spot.cvd_4h_pct",
+          "spot.volume_change_4h_pct"
+        ],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "gte", "value": 0.5},
+            {"metric": "spot.cvd_4h_pct", "op": "gte", "value": 1.0},
+            {"metric": "spot.volume_change_4h_pct", "op": "gte", "value": 30.0},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "lt", "value": 1.0}
+          ]
+        }
+      },
+      {
+        "key": "spot_active_sell",
+        "label": "价格下跌，Binance 现货主动卖出明显多于买入，成交额也在增加",
+        "surface_bias_on_confirmation": "negative",
+        "surface_bias_horizon": "current_window",
+        "category": "spot_flow",
+        "window": "4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual price and Binance Spot BTCUSDT taker-flow proxy",
+        "interpretation_limit": "只描述 Binance 现货主动买卖，不代表全部交易所",
+        "kind": "snapshot",
+        "required_all": ["price.change_4h_pct", "spot.cvd_4h_pct", "spot.volume_change_4h_pct"],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "lte", "value": -0.5},
+            {"metric": "spot.cvd_4h_pct", "op": "lte", "value": -1.0},
+            {"metric": "spot.volume_change_4h_pct", "op": "gte", "value": 30.0}
+          ]
+        }
+      },
+      {
+        "key": "support_liquidity_sweep",
+        "label": "价格曾跌破近期低位，随后重新回到该价位上方",
+        "surface_bias_on_confirmation": "positive",
+        "surface_bias_horizon": "event_time",
+        "category": "key_level_event",
+        "window": "recent_4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars with frozen prior support",
+        "interpretation_limit": "只证明价格曾跌破并重新回到近期低位上方，不代表已经反转",
+        "kind": "support_sweep"
+      },
+      {
+        "key": "resistance_false_breakout",
+        "label": "价格曾涨过近期高位，随后重新跌回该价位下方",
+        "surface_bias_on_confirmation": "negative",
+        "surface_bias_horizon": "event_time",
+        "category": "key_level_event",
+        "window": "recent_4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars with frozen prior resistance",
+        "interpretation_limit": "只证明价格曾涨过近期高位后重新跌回，不代表接下来一定继续下跌",
+        "kind": "false_breakout"
+      },
+      {
+        "key": "resistance_volume_stall",
+        "label": "阻力附近成交明显增加，但价格推进不足",
+        "surface_bias_on_confirmation": "neutral",
+        "surface_bias_horizon": "event_time",
+        "category": "key_level_event",
+        "window": "recent_4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars with frozen prior resistance and Binance Spot BTCUSDT hourly taker-flow proxy",
+        "interpretation_limit": "只证明主动买入净占优时成交放大但价格推进效率较低，不证明存在特定被动卖单，也不代表后续一定下跌",
+        "kind": "resistance_stall"
+      },
+      {
+        "key": "volume_breakout",
+        "label": "合约成交额明显增加时，价格涨过近期高位，之后的完整小时仍保持在该价位上方",
+        "surface_bias_on_confirmation": "positive",
+        "surface_bias_horizon": "event_time",
+        "category": "key_level_event",
+        "window": "recent_4h",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars and quote volume",
+        "interpretation_limit": "只证明上涨得到成交和后续完整小时确认，不直接预测后续涨幅",
+        "kind": "volume_breakout"
+      },
+      {
+        "key": "low_volume_range",
+        "label": "程序连续3次整点检测到价格变化不大、成交额持续减少，未平仓合约量基本稳定",
+        "surface_bias_on_confirmation": "neutral",
+        "surface_bias_horizon": "current_window",
+        "category": "activity_state",
+        "window": "3h_confirmation",
+        "source_scope": "Binance USD-M BTCUSDT perpetual closed 1h bars with aligned OI Hist and Binance Spot BTCUSDT closed 1h bars",
+        "interpretation_limit": "只描述成交额减少和价格变化不大，不能判断接下来向上还是向下",
+        "kind": "rolling",
+        "required_all": [
+          "price.change_4h_pct",
+          "derivatives.oi_change_4h_pct",
+          "derivatives.volume_change_4h_pct",
+          "spot.volume_change_4h_pct",
+          "structure.in_range"
+        ],
+        "when": {
+          "all": [
+            {"metric": "price.change_4h_pct", "op": "abs_lte", "value": 0.5},
+            {"metric": "derivatives.oi_change_4h_pct", "op": "abs_lte", "value": 0.75},
+            {"metric": "derivatives.volume_change_4h_pct", "op": "lte", "value": -20.0},
+            {"metric": "spot.volume_change_4h_pct", "op": "lte", "value": -20.0},
+            {"metric": "structure.in_range", "op": "eq", "value": true}
+          ]
+        }
+      }
+    ]
+  }
+}

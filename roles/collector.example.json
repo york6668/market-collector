@@ -1,0 +1,36 @@
+{
+  "role": "collector",
+  "machine": "collector-host",
+  "python": "/absolute/python3",
+  "code_dir": "/absolute/market-collector",
+  "entrypoint": "btc_push.py",
+  "arguments": [],
+  "service_label": "com.york.btcpush",
+  "log_dir": "/absolute/local-market/logs",
+  "private_environment_file": "/absolute/local-market/private-environment.json",
+  "environment": {
+    "STATE_FILE": "/absolute/local-market/state/btc.json",
+    "BTC_PUSH_LOG_FILE": "/absolute/local-market/logs/collector.log",
+    "BTC_PUSH_CHECK_TG_COMMANDS": "1",
+    "BTC_PUSH_EVIDENCE_ENABLED": "1",
+    "BTC_PUSH_FEAR_GREED_ENABLED": "1",
+    "BTC_PUSH_IMMEDIATE_FIRST": "0",
+    "BTC_PUSH_NEWS_BILINGUAL": "1",
+    "BTC_PUSH_NEWS_TRANSLATE_WITH_OLLAMA": "0",
+    "BTC_PUSH_OLLAMA_ENABLED": "0"
+  },
+  "writer_locks": [
+    "/absolute/local-market/state/btc.json.writer.lock",
+    "/absolute/local-market/state/btc.qqq.json.writer.lock",
+    "/absolute/local-market/state/btc.voo.json.writer.lock"
+  ],
+  "state_paths": {
+    "btc": "/absolute/local-market/state/btc.json",
+    "qqq": "/absolute/local-market/state/btc.qqq.json",
+    "voo": "/absolute/local-market/state/btc.voo.json",
+    "liquidation": "/absolute/local-market/state/btc.json.liquidation.json",
+    "hyperliquid": "/absolute/local-market/state/btc.json.hyperliquid.json",
+    "delivery": "/absolute/local-market/state/btc.json.delivery.sqlite3",
+    "market_history": "/absolute/local-market/state/btc.json.market.sqlite3"
+  }
+}
