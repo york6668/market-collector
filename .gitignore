@@ -22,3 +22,8 @@ runtime/
 backups/
 rehearsal/
 releases/
+
+# Local test inputs and generated replay results
+tests/fixtures/
+tests/collector_replay_fixture/
+.local/

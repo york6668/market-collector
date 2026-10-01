@@ -44,7 +44,7 @@ ETF 采集记录的 `flow_1d_source=current|history` 指明日流量实际取值
 
 当前 Hyperliquid 分钟样本保留 75 小时，primary 重建更早的 OI 无完整覆盖时，240H 证据会降级；不补造历史，也不改变当前 shadow 配置或阈值。旧宏观缓存 revision 9 不具备新 provenance，revision 10 的拍卖 raw history 混有计划/合同日期；revision 11 要求下一次正常采集刷新，不手动修改正式状态。
 
-正向回放样本为 `tests/fixtures/btc_evidence_v1/valid.json` 和原样 `valid.txt`：三核心数据集各 240 根，可验证为 valid_auxiliary；这是合成协议样本，独立核验来源数仍为 0。空 datasets 及仅有 complete=true 的伪完整窗口必须显式降级。
+正向回放样本由 `tests/collector_replay_fixture.py` 在测试临时目录构造为 `valid.json` 和原样 `valid.txt`：三核心数据集各 240 根，可验证为 valid_auxiliary；这是合成协议样本，独立核验来源数仍为 0。空 datasets 及仅有 complete=true 的伪完整窗口必须显式降级。
 
 文字先发送；JSON使用 `sendDocument` multipart 并通过 `reply_parameters.message_id` 回复该文字。文字与附件分别记录 message_id；附件失败不重发文字。读取按 chat_id/message_id/编辑版本记录关联；同 bundle_id 重复到达幂等；先到附件等待正文；正文编辑后重新检验，哈希不符不沿用旧关联。无附件的旧文字保持现有解析。
 

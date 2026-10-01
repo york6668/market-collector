@@ -150,7 +150,10 @@ class LatestObservations(unittest.TestCase):
             self.path, -9001, {7001},
             clock=lambda: 1788451200)
         self.addCleanup(self.reader.close)
-        fixtures = Path(__file__).parent / "tests" / "fixtures" / "btc_evidence_v1"
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import protocol_fixture_directory
+        fixtures = protocol_fixture_directory()
         self.base = json.loads((fixtures / "valid.json").read_text())
         self.text = (fixtures / "valid.txt").read_text()
         self.update_id = 0

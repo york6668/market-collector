@@ -77,7 +77,10 @@ class EvidenceContractTest(unittest.TestCase):
 class EvidenceHardeningTest(unittest.TestCase):
     def valid(self):
         from pathlib import Path
-        root = Path(__file__).parent / "tests" / "fixtures" / "btc_evidence_v1"
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import protocol_fixture_directory
+        root = protocol_fixture_directory()
         text = (root / "valid.txt").read_text(encoding="utf-8")
         bundle = evidence.decode_bundle((root / "valid.json").read_bytes())
         self.assertEqual("valid_auxiliary", evidence.validate_bundle(bundle, text)["status"])

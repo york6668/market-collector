@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import socket
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 HOUR_MS = 3_600_000
@@ -96,10 +97,59 @@ def build_case(case="valid", evidence_module=None):
                 validation=validation)
 
 
+
+_PROTOCOL_TEMP = None
+
+
+def protocol_fixture_directory():
+    """Materialize protocol inputs only in this test process's temporary space."""
+    global _PROTOCOL_TEMP
+    if _PROTOCOL_TEMP is None:
+        import btc_evidence as evidence
+        _PROTOCOL_TEMP = tempfile.TemporaryDirectory(prefix="collector-protocol-")
+        destination = Path(_PROTOCOL_TEMP.name)
+        payload = make_payload()
+        for bar in payload["raw_signal_bars"]:
+            bar.update(open=100, high=102, low=99, close=100, volume=1,
+                       quote_volume=100, taker_buy_quote_volume=60,
+                       oi=100, oi_value=10000)
+            bar["retrieved_at_ms"] = END_MS
+            bar["oi_retrieved_at_ms"] = END_MS
+        spot = payload["public_records"]["spot_cvd"]
+        rows = spot["value"]["hourly_flow"]
+        for row in rows:
+            row.update(open=100, high=102, low=99, close=100, volume=1,
+                       quote_volume=100, taker_buy_quote_volume=60)
+        spot["value"] = {"hourly_flow": rows}
+        spot["retrieved_at"] = END_MS / 1000
+        for key in ("time_basis", "source_time_missing", "stale"):
+            spot.pop(key, None)
+        payload["signal_data_quality"] = {}
+        valid_text = "协议回放合成样本：240 根闭合小时数据，仅用于关联与完整性测试，不代表市场事实。"
+        missing_text = "📊 BTC 09-04 15:00 JST\n辅助观察\n数据不足：仅用于离线传递回放。"
+        for name, raw, text in (("valid", payload, valid_text), ("missing", {}, missing_text)):
+            report_id = "fixture:240h:v1" if name == "valid" else "fixture:missing"
+            generated_at = GENERATED_AT if name == "valid" else "2026-09-04T06:00:00+00:00"
+            bundle = evidence.build_bundle(raw, text, report_id, generated_at)
+            (destination / (name + ".json")).write_bytes(evidence.encode_bundle(bundle))
+            (destination / (name + ".txt")).write_text(text, encoding="utf-8")
+        chat = {"id": -1000000000001}
+        updates = {
+            "text_update": {"update_id": 101, "channel_post": {
+                "message_id": 201, "chat": chat, "date": 1788501600, "text": missing_text}},
+            "document_update": {"update_id": 102, "channel_post": {
+                "message_id": 202, "chat": chat, "date": 1788501601,
+                "reply_to_message": {"message_id": 201},
+                "document": {"file_id": "offline-fixture", "file_unique_id": "offline-unique",
+                    "file_name": "btc-evidence.json", "mime_type": "application/json",
+                    "file_size": (destination / "missing.json").stat().st_size}}}}
+        (destination / "telegram_updates.json").write_text(json.dumps(updates), encoding="utf-8")
+    return Path(_PROTOCOL_TEMP.name)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--collector-root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).with_suffix(""))
+    parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     # Block network before importing production code; retain no permanent patches.
     network_attempts = []

@@ -57,10 +57,5 @@
   "test_market_scheduler.py",
   "test_role_export.py",
   "test_role_support.py",
-  "tests/collector_replay_fixture.py",
-  "tests/fixtures/btc_evidence_v1/missing.json",
-  "tests/fixtures/btc_evidence_v1/missing.txt",
-  "tests/fixtures/btc_evidence_v1/telegram_updates.json",
-  "tests/fixtures/btc_evidence_v1/valid.json",
-  "tests/fixtures/btc_evidence_v1/valid.txt"
+  "tests/collector_replay_fixture.py"
 ]

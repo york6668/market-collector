@@ -14,7 +14,10 @@ from btc_evidence_reader import EvidenceReader
 
 class JointReplayTest(unittest.TestCase):
     def test_full_fixture_attachment_retry_restart_and_out_of_order(self):
-        root = Path(__file__).parent / "tests/fixtures/btc_evidence_v1"
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import protocol_fixture_directory
+        root = protocol_fixture_directory()
         raw = (root / "valid.json").read_bytes()
         text = (root / "valid.txt").read_text(encoding="utf-8")
         bundle = json.loads(raw)

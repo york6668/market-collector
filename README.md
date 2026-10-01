@@ -10,7 +10,7 @@ BTC、QQQ、VOO 和 COMMON 的独立采集仓库。负责公开数据采集、�
 - [市场来源和产品语义](mappings/binance_markets.md)、[证据 V1](docs/BTC_COLLECTOR_EVIDENCE_V1.md)。V2 的格式、校验和投影由 `market_evidence.py`、`market_evidence_v2.py` 维护。
 - [codex-framework](https://github.com/york6668/codex-framework) 的 `york-worktree/Codex框架共享` 分支维护通用偏好和 York Skills。从该仓库 `AGENTS.md` 读取具体框架，本仓不保存其正文副本。
 
-源码、mappings、合成测试和配置样例随 Git 维护。行情历史、JSON/SQLite 状态、日志、发送回执、凭据及实际机器配置留在本机。`btc_push.py` 是稳定运行入口；源码检出、导出和测试均不会安装或重启正式服务。
+源码、mappings、测试程序和配置模板随 Git 维护；测试数据由构造程序写入临时目录，不提交或导出。行情历史、JSON/SQLite 状态、日志、发送回执、凭据及实际机器配置留在本机。`btc_push.py` 是稳定运行入口；源码检出、导出和测试均不会安装或重启正式服务。
 
 ## 安装与离线验证
 
