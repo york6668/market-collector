@@ -4,6 +4,8 @@ import time
 from contextlib import closing
 from datetime import datetime, timezone
 
+import seller_exhaustion
+
 from market_history import DAY, HOUR, HistoryStore, flow_summary, history_path
 from market_sources import BYBIT_WS, provenance
 
@@ -62,7 +64,10 @@ def collect(asset, path=None, now_ms=None):
     relation = "proxy" if asset == "VOO" else "direct"
     result = {}
     if not os.path.exists(path):
-        return {"history": {"status": "collecting", "reason": "history_not_initialized", "rows": [], "values": {}}}
+        empty = {"history": {"status": "collecting", "reason": "history_not_initialized", "rows": [], "values": {}}}
+        if asset == "BTC":
+            empty.update(seller_exhaustion.measurements(None, now_ms))
+        return empty
     with closing(HistoryStore(path, readonly=True)) as store:
         def get(series, instrument, days=15, limit=None):
             return store.rows(series, instrument, start_ms=now_ms - days * DAY,
@@ -87,6 +92,7 @@ def collect(asset, path=None, now_ms=None):
         item["coverage_basis"] = "observed_settlements_only_variable_interval"
         result["funding_long"] = item
         if asset == "BTC":
+            result.update(seller_exhaustion.measurements(store, now_ms))
             rows = get("stablecoin_supply", "peggedUSD", days=40)
             item = _record("stablecoin_supply", "peggedUSD", rows, "USD_peg_units", target=asset, max_age_ms=2*DAY)
             item["values"] = derived_values('stablecoin_supply', rows, now_ms)

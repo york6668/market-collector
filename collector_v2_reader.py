@@ -5,6 +5,7 @@ import re
 import btc_evidence as btc
 import market_evidence_v2 as v2
 import market_reader
+import seller_exhaustion
 
 
 def _codes(values):
@@ -81,7 +82,8 @@ def sanitize_observation(item):
         raise ValueError('invalid_v2_projection')
     cutoff = int(generated.timestamp() * 1000)
     base_names = set(btc._DATASET_SOURCE_IDS) if asset == 'BTC' else set(market_reader.DATASET_SOURCES) | {'macro'}
-    known = base_names | v2.required_measurements(asset)
+    selected = v2.required_measurements(asset) | (item["datasets"].keys() & v2.optional_measurements(asset))
+    known = base_names | v2.required_measurements(asset) | v2.optional_measurements(asset)
     reasons = {name: _codes(codes) for name, codes in quality['dataset_reasons'].items()
                if name in known or name in ('__bundle__', '__sources__', '__unsupported__')}
     reasons = {name: codes for name, codes in reasons.items() if codes}
@@ -102,9 +104,18 @@ def sanitize_observation(item):
             datasets[name] = btc._project_dataset(name, ds, item['sources'])
             sources.update({sid: btc._project_source(sid, item['sources'][sid]) for sid in refs})
         result = {'asset_id': asset, 'generated_at': item['generated_at'], 'datasets': datasets, 'sources': sources}
-    for name in v2.required_measurements(asset):
+    for name in selected:
         ds = item['datasets'].get(name)
         contract = v2._contract(name, asset)
+        if name == seller_exhaustion.NAME:
+            raw = seller_exhaustion.from_projection(ds) if isinstance(ds, dict) else seller_exhaustion.measurements(None, cutoff)[name]
+            problems = sorted(set(seller_exhaustion.problems(raw, cutoff) + reasons.get(name, [])))
+            projected = seller_exhaustion.project(raw, cutoff, problems)
+            result['datasets'].update(projected['datasets'])
+            result['sources'].update(projected['sources'])
+            if problems:
+                reasons[name] = problems
+            continue
         if contract is None:
             raw = v2.empty_measurement(name, asset, cutoff)
         elif not isinstance(ds, dict):

@@ -10,13 +10,14 @@ import re
 from urllib.parse import urlsplit
 
 import btc_evidence as base
+import seller_exhaustion
 from market_history import DAY, HOUR, flow_summary
 from market_observations import derived_values
 from market_sources import SPOT, FUTURES, OI, FUNDING, HL, STABLE, VIX, VXN, CFTC, STOCK_WS, BYBIT_WS
 
 SCHEMAS = ("BTC_COLLECTOR_EVIDENCE_V2", "MARKET_COLLECTOR_EVIDENCE_V2")
 NUMBERS = set("observed_ms open_time close_time open high low close volume quote_volume taker_buy_quote quantity notional_value rate supply market_value_usd oi mark_price funding day_volume value open_interest asset_manager_net leveraged_net long_quantity short_quantity long_estimated_notional short_estimated_notional count retrieved_at_ms source_as_of_ms price previous_close vw".split())
-NUMBERS.add('last_event_retrieved_ms')
+NUMBERS.update(('last_event_retrieved_ms', 'period_start_ms', 'period_end_ms'))
 STRINGS = {"date", "adjustment_mode"}
 COMMON = {"derivative_cvd_long", "derivative_oi_long", "funding_long"}
 CRYPTO = {"spot_cvd_long", "stablecoin_supply_long", "hyperliquid_oi_long", "hyperliquid_funding_long", "bybit_liquidation_long"}
@@ -26,6 +27,10 @@ GAPS = {"equity_etf": "public_stable_source_missing", "equity_spot_cvd": "aggres
 
 def required_measurements(asset):
     return COMMON | (CRYPTO if asset == "BTC" else EQUITY | GAPS.keys())
+
+
+def optional_measurements(asset):
+    return set(seller_exhaustion.METRICS) if asset == "BTC" else set()
 
 
 def empty_measurement(name, asset, cutoff):
@@ -70,6 +75,8 @@ def _contract(name, asset):
             "stock_price_public": ("stock_price", asset, "USD/share", "direct", [STOCK_WS]),
             "equity_volatility": ("volatility", "VIX" if asset == "VOO" else "VXN", "index_points", "reference", [VIX if asset == "VOO" else VXN]),
             "equity_positioning": ("cftc", "SP500" if asset == "VOO" else "NASDAQ100", "contracts", "reference", [CFTC])})
+    if asset == "BTC":
+        contracts[seller_exhaustion.NAME] = (seller_exhaustion.NAME, "BTC", "fraction", "direct", seller_exhaustion.ENDPOINTS)
     return contracts.get(name)
 
 
@@ -110,7 +117,8 @@ def build_bundle(payload, report_text, report_id, generated_at, full_report_text
         measurements['stock_price_public']['as_of_ms'] = source_time
         measurements['stock_price_public']['time_basis'] = 'source_observation' if source_time is not None else 'received_at'
     for name, item in measurements.items():
-        item['rows'] = _rows(item.get('rows') or [])
+        if name != seller_exhaustion.NAME:
+            item['rows'] = _rows(item.get('rows') or [])
     body = {'schema': SCHEMAS[0 if asset == 'BTC' else 1], 'asset_id': asset,
             'role': 'auxiliary_observation', 'report_id': str(report_id), 'generated_at': generated_at,
             'text_sha256': base.text_hash(report_text), 'measurements': measurements,
@@ -131,6 +139,8 @@ def _number(value):
 
 
 def _problems(name, item, asset, cutoff):
+    if name == seller_exhaustion.NAME and asset == "BTC":
+        return seller_exhaustion.problems(item, cutoff)
     contract = _contract(name, asset)
     if contract is None:
         return ['source_unavailable' if name in ('equity_etf','equity_spot_cvd','history') else 'unsupported_dataset']
@@ -320,6 +330,8 @@ def auxiliary_observation(bundle, report_text):
 
 def project_measurement(name, item, asset, cutoff, problems=None):
     """Recompute one typed domain for both raw attachments and local exports."""
+    if name == seller_exhaustion.NAME and asset == 'BTC':
+        return seller_exhaustion.project(item, cutoff, problems)
     result = {'datasets': {}, 'sources': {}}
     if problems is None:
         problems = _problems(name, item, asset, cutoff)

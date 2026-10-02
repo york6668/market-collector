@@ -28,6 +28,7 @@ import btc_collection_io as public_io
 import market_assets as assets
 import market_history
 import market_observations
+import seller_exhaustion
 import market_public
 import market_streams
 import market_common as common
@@ -11883,6 +11884,7 @@ def build_full_report_message(now_tokyo, is_new_day, today, push_count, payload,
     lines.append("")
     lines.append("💰 现货 / 稳定币")
     lines.extend(format_spot_block(payload))
+    lines.extend(seller_exhaustion.format_lines(payload))
     lines.append("")
     lines.append("📐 过去4小时发生了什么")
     lines.extend(format_market_patterns_block(payload))
@@ -11925,6 +11927,7 @@ def build_report_message(now_tokyo, is_new_day, today, push_count, payload, forc
     lines.append("")
     lines.append("📍 资金")
     lines.extend(format_plain_short_funds_block(payload))
+    lines.extend(seller_exhaustion.format_lines(payload))
     lines.append("")
     lines.append("📐 过去4小时发生了什么")
     lines.extend(format_plain_short_patterns_block(payload))

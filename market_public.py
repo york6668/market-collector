@@ -1,6 +1,6 @@
 """Anonymous, documented sources and resumable history jobs.
 
-Network work runs outside report generation. No account or API-key fallback.
+Network work runs outside report generation. All sources are anonymous; no paid or account API fallback.
 """
 import csv
 import io
@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 import btc_collection_io as http
+import seller_exhaustion
 from market_history import DAY, HOUR, HistoryStore, history_path
 from market_sources import SPOT, FUTURES, OI, FUNDING, ARCHIVE, STABLE, VIX, VXN, CFTC, HL, STOCK_WS, BYBIT_WS, provenance
 _workers = {}
@@ -284,6 +285,8 @@ def _jobs():
             "stablecoins": sync_stablecoins, "VIX": lambda s, n: sync_volatility(s, "VIX", n),
             "VXN": lambda s, n: sync_volatility(s, "VXN", n), "CFTC": sync_cftc,
             "hl_funding": lambda s, n: sync_funding(s, "BTC", n, hyperliquid=True)}
+    for kind in seller_exhaustion.INPUTS:
+        jobs["seller_input_" + kind] = lambda s, n, kind=kind: seller_exhaustion.sync(s, kind, n)
     for symbol in ("BTCUSDT", "QQQUSDT", "SPYUSDT"):
         jobs["futures_" + symbol] = lambda s, n, symbol=symbol: sync_klines(s, symbol, now_ms=n)
         jobs["oi_" + symbol] = lambda s, n, symbol=symbol: sync_oi(s, symbol, n)
@@ -304,7 +307,7 @@ def run_once(path, *, now_ms=None, jobs=None, log=lambda _: None):
                 store.health_sample(name, now_ms, True)
             except Exception as exc:
                 failures = min(16, state.get("failures", 0) + 1)
-                delay = exc.seconds if isinstance(exc, RetryLater) else min(1800, 15 * 2 ** failures)
+                delay = exc.seconds if isinstance(exc, (RetryLater, seller_exhaustion.SourceUnavailable)) else min(1800, 15 * 2 ** failures)
                 state = {**state, "failures": failures, "last_error": type(exc).__name__,
                          "next_ms": now_ms + int(delay * 1000)}
                 log(f"public history {name}: {type(exc).__name__}")

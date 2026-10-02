@@ -18,6 +18,7 @@
   "collector_v2_reader.py",
   "docs/BTC_COLLECTOR_EVIDENCE_V1.md",
   "mappings/binance_markets.md",
+  "mappings/glassnode_seller_exhaustion.md",
   "market_assets.py",
   "market_common.py",
   "market_evidence.py",
@@ -39,6 +40,7 @@
   "roles/offline_tests.py",
   "roles/role_support.py",
   "roles/validate_repository.py",
+  "seller_exhaustion.py",
   "test_btc_collection.py",
   "test_btc_collection_io.py",
   "test_btc_delivery.py",
@@ -57,5 +59,6 @@
   "test_market_scheduler.py",
   "test_role_export.py",
   "test_role_support.py",
+  "test_seller_exhaustion.py",
   "tests/collector_replay_fixture.py"
 ]
