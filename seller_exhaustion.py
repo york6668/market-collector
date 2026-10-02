@@ -7,6 +7,7 @@ import copy
 import math
 import statistics
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from market_history import DAY
 
@@ -45,8 +46,14 @@ def parse(raw, kind, now_ms):
             raise ValueError('invalid_response')
         start = int(day.timestamp() * 1000)
         raw_stamp = item.get('unixTs')
-        if isinstance(raw_stamp, bool) or str(raw_stamp) != str(start // 1000) or start in seen or start < 0:
-            raise ValueError('invalid_response')
+        try:
+            if type(raw_stamp) not in (str, int, float) or len(str(raw_stamp)) > 64:
+                raise ValueError('invalid_response')
+            stamp = Decimal(str(raw_stamp))
+            if not stamp.is_finite() or stamp != Decimal(start // 1000) or start in seen or start < 0:
+                raise ValueError('invalid_response')
+        except InvalidOperation as exc:
+            raise ValueError('invalid_response') from exc
         seen.add(start)
         if start + DAY > now_ms:
             continue

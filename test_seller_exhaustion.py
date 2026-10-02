@@ -107,6 +107,17 @@ class SellerExhaustionTests(unittest.TestCase):
             bad=raw('price');bad[-1][key]=value
             with self.assertRaises(ValueError):sec.parse(bad,'price',NOW)
 
+    def test_source_timestamp_numeric_notation_is_exact(self):
+        for stamp in ('1.7908128E9', '1790812800.0', 1790812800.0):
+            row = raw('price')[-1]
+            row['unixTs'] = stamp
+            self.assertEqual(END, sec.parse([row], 'price', NOW)[0]['period_start_ms'])
+        for stamp in (True, 'NaN', 'Infinity', '1790812800.1', '1.790812801E9'):
+            row = raw('price')[-1]
+            row['unixTs'] = stamp
+            with self.assertRaises(ValueError):
+                sec.parse([row], 'price', NOW)
+
     def test_zero_volatility_is_measured_zero_not_missing(self):
         data=raw('price')
         for r in data:r['btcPrice']='100'
