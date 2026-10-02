@@ -184,6 +184,15 @@ class SellerExhaustionTests(unittest.TestCase):
             self.assertIn('数据不足',sec.format_lines(payload)[0])
             self.assertEqual(1,get.call_count)
 
+    def test_report_collection_uses_daily_freshness_not_hourly_default(self):
+        self.collect()
+        current = market_observations.collect('BTC', self.path, NOW + 14*3600000)
+        self.assertEqual('ok', current[sec.NAME]['status'])
+        self.assertNotIn('数据延迟', sec.format_lines({'public_history': current})[0])
+        stale = market_observations.collect('BTC', self.path, NOW + 3*DAY)
+        self.assertEqual('stale', stale[sec.NAME]['status'])
+        self.assertIn('仅作历史背景', sec.format_lines({'public_history': stale})[0])
+
     def test_display_labels_reconstruction_original_date_and_stale_background(self):
         item=self.collect();line=sec.format_lines({'public_history':{sec.NAME:item}})[0]
         self.assertIn('免费复算',line);self.assertIn('2026-10-01',line)

@@ -171,6 +171,7 @@ def measurements(store, now_ms):
         status = 'stale'
     return {NAME: {'series': NAME, 'symbol': 'BTC', 'target_asset': 'BTC', 'relation': 'direct',
         'unit': 'fraction', 'analysis_eligible': False, 'method': METHOD, 'status': status,
+        'max_age_ms': 2*DAY,
         'input_issues': issues, 'rows': rows, 'values': valid, 'calculated_at_ms': now_ms,
         'as_of_ms': valid.get('as_of_ms')}}
 
