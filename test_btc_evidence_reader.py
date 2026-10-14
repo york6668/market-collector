@@ -306,6 +306,11 @@ class LatestObservations(unittest.TestCase):
         before = "\n".join(self.reader.db.iterdump())
         with self.assertRaisesRegex(ValueError, "observations_output_size_limit"):
             self.reader.observations(latest_only=True)
+        combined = self.reader.observations(latest_only=True, asset="all")
+        self.assertEqual(["BTC", "QQQ", "VOO"], [row["asset_id"] for row in combined])
+        self.assertEqual(bundle["report_id"], combined[0]["report_id"])
+        with self.assertRaisesRegex(ValueError, "observations_output_size_limit"):
+            self.reader.observations(latest_only=True, asset="all", max_output_bytes=4 * 1024 * 1024)
         self.assertEqual(1, len(self.reader.observations()))
         self.assertEqual(before, "\n".join(self.reader.db.iterdump()))
 

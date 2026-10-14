@@ -369,7 +369,8 @@ class EvidenceReader:
             raise ValueError("unsupported observation asset")
         wanted = ("BTC", "QQQ", "VOO") if asset == "all" else (asset,)
         if max_output_bytes is None and latest_only:
-            max_output_bytes = 4 * 1024 * 1024
+            # The three-asset batch shares the core's 8 MiB material budget.
+            max_output_bytes = (8 if asset == "all" else 4) * 1024 * 1024
         if max_output_bytes is not None and (
                 type(max_output_bytes) is not int or max_output_bytes <= 0):
             raise ValueError("max_output_bytes must be a positive integer")

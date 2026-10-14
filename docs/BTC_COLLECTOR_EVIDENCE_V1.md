@@ -54,7 +54,7 @@ ETF 采集记录的 `flow_1d_source=current|history` 指明日流量实际取值
 
 校验状态为 rejected、pending_text、valid_auxiliary 或 degraded_auxiliary；未知 Schema/哈希不符/根结构错误 rejected，窗口或来源不完整按数据域降级，不阻断其他消息。所有状态均不表示市场事实 VERIFIED。读取端调用 `auxiliary_observation(bundle, report_text)`，必须传关联消息的当前正文；函数内部重新验证正文及附件哈希，旧 validation 字典不能替代当前正文，正文编辑或附件变更后不得复用旧投影。附件尚未匹配正文时只调用 validate_bundle 等待关联。
 
-实际策略导出使用 `EvidenceReader.observations(latest_only=True, asset_id="BTC")`，返回指定标的最新关联文字报告当前附件版本的至多一份快照。缺省 `asset_id` 仍为 BTC。先按正文标的（缺正文时用股票附件文件名）分组，再按同频道正文 message_id、附件 message_id 降序定位最新和校验；晚到旧附件不改变报告顺序。该标的最新附件待下载、无效、未知版本或正文编辑不匹配时返回空数组，不用历史有效报告回填当前数据，也不影响其他标的。无参 `observations()` 保留 BTC 历史诊断兼容，不能作为当前覆盖快照。快照按实际 CLI 的 UTF-8 JSON 格式及结尾换行限制为 4 MiB，超过上限明确失败，不截断测量；`max_output_bytes` 可显式收紧或配置诊断输出上限。
+实际策略导出使用 `EvidenceReader.observations(latest_only=True, asset_id="BTC")`，返回指定标的最新关联文字报告当前附件版本的至多一份快照。缺省 `asset_id` 仍为 BTC。先按正文标的（缺正文时用股票附件文件名）分组，再按同频道正文 message_id、附件 message_id 降序定位最新和校验；晚到旧附件不改变报告顺序。该标的最新附件待下载、无效、未知版本或正文编辑不匹配时返回空数组，不用历史有效报告回填当前数据，也不影响其他标的。无参 `observations()` 保留 BTC 历史诊断兼容，不能作为当前覆盖快照。快照按实际 CLI 的 UTF-8 JSON 格式及结尾换行计量：单标的缺省限制为 4 MiB，`asset="all"` 三标的合并限制为 8 MiB，与策略核心的材料读取上限一致。超过上限明确失败，不截断测量；`max_output_bytes` 可显式收紧或配置诊断输出上限。
 
 QQQ、VOO 使用 `MARKET_COLLECTOR_EVIDENCE_V1`，实现位于 `market_evidence.py`，具体来源及单位见 [币安市场映射](../mappings/binance_markets.md)。根节点包含 `asset_id`、完整 `instrument` 身份；数据集包含 `instrument/relation`，股票小时线为 USD/share 与 shares，合约数量/名义值为 contracts/USDT。VOO 的 SPYUSDT 始终是 proxy，基差仅为 SPY 自身标记价/指数价。普通 Funding 与 Special 股息调整是不同数据集，可有相同结算时刻。源报价时间缺失必须保留 null；股票日历凭据用于核对预期休市间隔。字段、单位、时间或来源不合法的测量不进入投影。两种 schema 均保持辅助观察和独立已验证来源计数 0；旧 BTC 附件缺 `asset_id` 时仍按 BTC 校验。
 
