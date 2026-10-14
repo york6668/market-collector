@@ -620,5 +620,73 @@ class BitboHoldingsContractTests(unittest.TestCase):
             self.assertIn("etf", evidence.validate_bundle(mutated, "test")["dataset_reasons"])
 
 
+class AnonymousFlowEvidenceTests(unittest.TestCase):
+    def bundle(self, version=1, no_holdings=False, missing_old_day=False):
+        from pathlib import Path
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import make_payload, anonymous_etf_record, GENERATED_AT
+        payload = make_payload()
+        record = anonymous_etf_record()
+        if no_holdings:
+            record["value"].update(holdings_btc=None, holding_7d_pct=None)
+            record["holdings_record"] = {"status": "unavailable"}
+        if missing_old_day:
+            del record["value"]["history"][0]
+            record["value"]["flow_30d_usd"] = None
+        payload["public_records"]["etf"] = record
+        payload["evidence_version"] = version
+        return evidence.build_bundle(payload, "flow-test", "anonymous-flow", GENERATED_AT)
+
+    def rehash(self, bundle):
+        bundle["bundle_id"] = "btc:" + hashlib.sha256(evidence.canonical_bytes(
+            {key: value for key, value in bundle.items() if key != "bundle_id"})).hexdigest()
+
+    def test_independent_sources_and_v1_v2_reader_projection(self):
+        for version in (1, 2):
+            for no_holdings in (False, True):
+                bundle = self.bundle(version, no_holdings)
+                validation = evidence.validate_bundle(bundle, "flow-test")
+                self.assertNotIn("etf", validation["dataset_reasons"])
+                result = evidence.auxiliary_observation(bundle, "flow-test")
+                values = result["datasets"]["etf"]["values"]
+                self.assertAlmostEqual(30.3703701, values["flow_30d_usd"])
+                self.assertEqual("TFTC", result["sources"]["public_etf_history"]["venue"])
+                if no_holdings:
+                    self.assertNotIn("public_etf", result["sources"])
+                    self.assertIsNone(values["holdings_btc"])
+                else:
+                    self.assertEqual("Bitbo", result["sources"]["public_etf"]["venue"])
+                self.assertEqual(0, result["independent_verified_sources"])
+
+    def test_partial_long_window_does_not_discard_holdings_or_daily_flow(self):
+        bundle = self.bundle(missing_old_day=True)
+        validation = evidence.validate_bundle(bundle, "flow-test")
+        self.assertNotIn("etf", validation["dataset_reasons"])
+        values = evidence.auxiliary_observation(bundle, "flow-test")["datasets"]["etf"]["values"]
+        self.assertIsNone(values["flow_30d_usd"])
+        self.assertIsNotNone(values["flow_5d_usd"])
+        self.assertIsNotNone(values["holdings_btc"])
+
+    def test_scope_date_units_source_and_window_forgery_are_rejected(self):
+        for mutation in (
+                lambda b: b["datasets"]["etf"].update(flow_scope=["IBIT"]),
+                lambda b: b["datasets"]["etf"].update(units={"flow": "BTC", "holdings": "BTC"}),
+                lambda b: b["datasets"]["etf"]["rows"][-1]["perEtfUsd"].pop("BTC"),
+                lambda b: b["datasets"]["etf"]["rows"][-1].update(totalNetInflow=99),
+                lambda b: b["datasets"]["etf"]["rows"].pop(-3),
+                lambda b: b["datasets"]["etf"]["values"].update(flow_30d_usd=99),
+                lambda b: b["datasets"]["etf"]["field_sources"].update(flow_1d_usd=["public_etf"]),
+                lambda b: b["sources"]["public_etf_history"].update(venue="SoSoValue"),
+                lambda b: b["sources"]["public_etf_history"]["source_dates"].update(flow_1d="2026-09-02"),
+                lambda b: b["datasets"]["etf"]["values"].update(flow_1d_assets_pct=1)):
+            bundle = self.bundle(); mutation(bundle); self.rehash(bundle)
+            self.assertIn("etf", evidence.validate_bundle(bundle, "flow-test")["dataset_reasons"])
+        bundle = self.bundle(missing_old_day=True)
+        bundle["datasets"]["etf"]["values"]["flow_30d_usd"] = 1
+        self.rehash(bundle)
+        self.assertIn("incomplete_trading_day_samples", evidence.validate_bundle(bundle, "flow-test")["dataset_reasons"]["etf"])
+
+
 if __name__ == "__main__":
     unittest.main()

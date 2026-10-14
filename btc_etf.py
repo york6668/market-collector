@@ -1,4 +1,4 @@
-"""Anonymous US spot BTC ETF holdings; USD net flows remain unavailable."""
+"""Anonymous US spot BTC ETF holdings; independently sourced from USD flows."""
 import copy
 import json
 import math
@@ -162,14 +162,15 @@ def flow_background(state):
     """Keep historical display separate from all current measurement values."""
     for snap in reversed(state.get("public_snapshots") or []):
         record = (snap.get("public") or {}).get("etf") or {}
-        previous = record.get("flow_background")
-        if isinstance(previous, dict):
-            return copy.deepcopy(previous)
         value = record.get("value") or {}
         if not any(type(value.get(key)) in (int, float) for key in FLOW_FIELDS[:3]):
+            previous = record.get("flow_background")
+            if isinstance(previous, dict):
+                return copy.deepcopy(previous)
             continue
-        return {"source": record.get("source"), "venue": record.get("venue"),
-                "endpoint_url": record.get("endpoint_url"),
+        flow = record.get("flow_record") or record
+        return {"source": flow.get("source") or flow.get("venue"), "venue": flow.get("venue"),
+                "endpoint_url": flow.get("endpoint_url"),
                 "value": {key: value.get(key) for key in FLOW_FIELDS[:3]},
                 "source_date": copy.deepcopy(value.get("source_date") or record.get("source_date") or {}),
                 "analysis_eligible": False}

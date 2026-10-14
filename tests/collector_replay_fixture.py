@@ -38,6 +38,30 @@ def holdings_only_record(day="2026-09-03", retrieved_at=(END_MS + 1000) / 1000, 
                       "holding_7d_status": "collecting", "source_date": {"holdings": day}}}
 
 
+def flow_response(end="2026-09-03", count=30, amount=1.01234567):
+    """Construct a per-fund USD response; no recorded provider data."""
+    import btc_etf_flow
+    import btc_etf
+    return {"units": "USD", "updatedThrough": end, "days": [
+        {"date": day, "netFlowUsd": amount,
+         "perEtfUsd": {symbol: amount if symbol == "IBIT" else 0 for symbol in btc_etf.FUNDS}}
+        for day in btc_etf_flow.trading_dates(end, count)]}
+
+
+def anonymous_etf_record():
+    import btc_etf_flow
+    record = holdings_only_record()
+    parsed = btc_etf_flow.parse_json(json.dumps(flow_response()))
+    record["status"] = "ok"
+    record["reason"] = None
+    record["value"].update(parsed["values"], history=parsed["history"])
+    record["value"]["source_date"].update({f"flow_{n}d": parsed["source_date"] for n in (1, 5, 30)})
+    record["flow_record"] = {"status": "ok", "venue": btc_etf_flow.VENUE,
+        "endpoint_url": btc_etf_flow.ENDPOINT, "source_date": parsed["source_date"],
+        "retrieved_at": record["retrieved_at"], "flow_scope": parsed["flow_scope"]}
+    return record
+
+
 def make_payload(case="valid"):
     """Build 240 source bars; OI timestamps remain actual synthetic source stamps."""
     if case not in CASES:

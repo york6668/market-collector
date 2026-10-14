@@ -14,6 +14,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 import btc_etf
+import btc_etf_flow
 
 SCHEMA = "BTC_COLLECTOR_EVIDENCE_V1"
 MAX_BYTES = 5 * 1024 * 1024
@@ -210,11 +211,37 @@ def _build_btc_bundle(payload, report_text, report_id, generated_at, full_report
             ds["rows"] = value.get("history") or []
             ds["values"] = {k: v for k, v in value.items() if k != "history"}
             if btc_etf.is_holdings_source(record):
-                ds["formula"] = "sum BTC balances of the 12 agreed US spot funds; no USD net-flow inference"
+                ds["formula"] = "Bitbo BTC balances; TFTC USD creations minus redemptions; complete trading-day windows"
                 ds["holdings_scope"] = record.get("holdings_scope")
                 ds["holdings_rows"] = record.get("holdings_rows")
                 ds["holding_7d_basis"] = record.get("holding_7d_basis")
                 ds["field_sources"] = {"holdings_btc": [sid], "holding_7d_pct": [sid]}
+                holding_dates = source_dates if isinstance(source_dates, dict) else {}
+                sources[sid]["source_dates"] = {k: v for k, v in holding_dates.items() if k == "holdings"}
+                ds["rows"] = []
+                flow = record.get("flow_record") or {}
+                if btc_etf_flow.is_flow_source(flow) and any(
+                        _number(value.get(f"flow_{days}d_usd")) for days in btc_etf_flow.WINDOWS):
+                    history_sid = sid + "_history"
+                    sources[history_sid] = _source(history_sid, "TFTC US spot BTC ETF USD net flows",
+                        flow["endpoint_url"], flow["venue"], iso_time(flow.get("retrieved_at")),
+                        None, {f"flow_{days}d": flow.get("source_date") for days in btc_etf_flow.WINDOWS})
+                    sources[history_sid]["time_basis"] = "observation_date"
+                    ds["source_ids"].append(history_sid)
+                    ds["rows"] = value.get("history") or []
+                    ds["flow_scope"] = flow.get("flow_scope")
+                    ds["field_sources"].update({f"flow_{days}d_usd": [history_sid] for days in btc_etf_flow.WINDOWS})
+                if "holdings_record" in record and value.get("holdings_btc") is None:
+                    ds["source_ids"].remove(sid)
+                    del sources[sid]
+                    ds["field_sources"].pop("holdings_btc")
+                    ds["field_sources"].pop("holding_7d_pct")
+                # Dates of failed/expired domains stay in the collection record,
+                # not in measurements proven by the other domain's source.
+                measured_dates = value.get("source_date") if isinstance(value.get("source_date"), dict) else {}
+                ds["values"]["source_date"] = {k: v for k, v in measured_dates.items()
+                    if k == "holdings" and sid in ds["source_ids"]
+                    or k.startswith("flow_") and sid + "_history" in ds["source_ids"]}
                 datasets[name] = ds
                 continue
             history_sid = sid + "_history"
@@ -357,7 +384,8 @@ _SOURCE_CONTRACTS = {
     "public_hyperliquid_basis": [_HL],
     "public_etf": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics"),
                    (btc_etf.VENUE, "bitbo.io", "/treasuries/us-etfs/")],
-    "public_etf_history": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/historicalInflowChart")],
+    "public_etf_history": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/historicalInflowChart"),
+                           (btc_etf_flow.VENUE, "www.tftc.io", "/bitcoin-etf-flows/data.json")],
     "public_stablecoin": [("DefiLlama", "stablecoins.llama.fi", "/stablecoins")],
     "market_current": [("Binance Spot 24hr", "api.binance.com", "/api/v3/ticker/24hr"),
                        ("Binance Spot", "api.binance.com", "/api/v3/ticker/24hr"),
@@ -896,6 +924,12 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
     elif name == "macro":
         if any(not sid.startswith("macro_") for sid in refs):
             problems.append("dataset_source_mismatch")
+    elif name == "etf" and btc_etf_flow.is_flow_source(sources.get("public_etf_history") or {}):
+        expected_refs = {"public_etf_history"}
+        if btc_etf.is_holdings_source(sources.get("public_etf") or {}):
+            expected_refs.add("public_etf")
+        if set(refs) != expected_refs:
+            problems.append("dataset_source_mismatch")
     elif set(refs) != ({"public_etf"} if name == "etf" and
             btc_etf.is_holdings_source(sources.get("public_etf") or {}) else _DATASET_SOURCE_IDS[name]):
         problems.append("dataset_source_mismatch")
@@ -956,8 +990,16 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
         if (not all(_number(v) for v in (mark, index, basis)) or mark <= 0 or index <= 0
                 or not math.isclose(basis, (mark - index) / index * 100, rel_tol=1e-9, abs_tol=1e-8)):
             problems.append("basis_value_mismatch")
+    tftc = name == "etf" and btc_etf_flow.is_flow_source(sources.get("public_etf_history") or {})
     if name == "etf" and btc_etf.is_holdings_source(sources.get("public_etf") or {}):
-        problems.extend(_etf_holdings_problems(ds, sources["public_etf"]))
+        problems.extend(_etf_holdings_problems(ds, sources["public_etf"], flow_supported=tftc))
+        if tftc:
+            problems.extend(_etf_flow_problems(ds, sources["public_etf_history"], generated))
+    elif tftc:
+        values = ds.get("values") or {}
+        if any(values.get(k) is not None for k in ("holdings_btc", "holding_7d_pct", "holdings_market_pct")):
+            problems.append("flow_source_cannot_supply_holdings")
+        problems.extend(_etf_flow_problems(ds, sources["public_etf_history"], generated))
     elif name == "etf":
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             problems.append("invalid_rows")
@@ -992,15 +1034,15 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
     return sorted(set(problems))
 
 
-def _etf_holdings_problems(ds, source):
+def _etf_holdings_problems(ds, source, flow_supported=False):
     values = ds.get("values") if isinstance(ds.get("values"), dict) else {}
     problems = []
     try:
         btc_etf.validate_holdings(ds.get("holdings_scope"), ds.get("holdings_rows"), values.get("holdings_btc"))
     except ValueError as exc:
         problems.append(str(exc))
-    if ds.get("rows") != [] or any(values.get(k) is not None for k in (
-            *btc_etf.FLOW_FIELDS, "holdings_market_pct")):
+    if (not flow_supported and (ds.get("rows") != [] or any(values.get(k) is not None for k in btc_etf.FLOW_FIELDS))
+            or values.get("holdings_market_pct") is not None):
         problems.append("holdings_source_cannot_supply_flow_or_assets")
     field_sources = ds.get("field_sources") or {}
     if not isinstance(field_sources, dict) or field_sources.get("holdings_btc") != ["public_etf"]:
@@ -1025,6 +1067,47 @@ def _etf_holdings_problems(ds, source):
                 raise ValueError("holding_7d_value_mismatch")
         except (ValueError, TypeError, KeyError) as exc:
             problems.append(str(exc) if isinstance(exc, ValueError) else "invalid_holding_7d_basis")
+    return problems
+
+
+def _etf_flow_problems(ds, source, generated):
+    values = ds.get("values") if isinstance(ds.get("values"), dict) else {}
+    rows = ds.get("rows")
+    refs = ds.get("field_sources") or {}
+    dates = source.get("source_dates") or {}
+    problems = []
+    if ds.get("units") != {"flow": "USD", "holdings": "BTC"}:
+        problems.append("etf_unit_mismatch")
+    if ds.get("flow_scope") != list(btc_etf.FUNDS):
+        problems.append("flow_fund_scope_gap")
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return problems + ["invalid_flow_rows"]
+    day = dates.get("flow_1d")
+    try:
+        order = [btc_etf_flow.source_day(row.get("date")).isoformat() for row in rows]
+        if order != sorted(set(order)) or order[-1] != day or len(rows) > 30:
+            raise ValueError("invalid_flow_day_order")
+        stale, _ = btc_etf_flow.freshness(day, generated.timestamp())
+        if stale:
+            problems.append("stale_flow_source_date")
+    except ValueError as exc:
+        return problems + [str(exc)]
+    for count in btc_etf_flow.WINDOWS:
+        key = f"flow_{count}d_usd"
+        observed = values.get(key)
+        if observed is None:
+            continue
+        if refs.get(key) != ["public_etf_history"]:
+            problems.append("flow_field_source_mismatch")
+        if dates.get(f"flow_{count}d") != day or (values.get("source_date") or {}).get(f"flow_{count}d") != day:
+            problems.append("flow_date_mismatch")
+        expected, reason = btc_etf_flow.window(rows, count, day)
+        if reason:
+            problems.append(reason)
+        elif not _number(observed) or not math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-6):
+            problems.append("trading_day_sum_mismatch")
+    if any(values.get(f"flow_{count}d_assets_pct") is not None for count in btc_etf_flow.WINDOWS):
+        problems.append("flow_source_cannot_supply_assets_pct")
     return problems
 
 

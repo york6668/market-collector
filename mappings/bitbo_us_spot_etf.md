@@ -20,10 +20,10 @@
 
 ## 流量边界与兼容
 
-停止请求失效的 SoSoValue 旧采集接口。当前 `flow_1d_usd`、`flow_5d_usd`、`flow_30d_usd` 及资产比例字段为 null；Bitbo 持仓差与当前价格不能换算成真实美元净流量。`holdings_market_pct` 同样保持 null。
+停止请求失效的 SoSoValue 旧采集接口。`flow_1d_usd`、`flow_5d_usd`、`flow_30d_usd` 独立使用 [TFTC 公开美元流量](tftc_us_spot_etf_flow.md)；Bitbo 持仓差与当前价格不能换算成真实美元净流量。流量资产比例字段及 `holdings_market_pct` 保持 null。
 
 已有 SoSoValue 流量只放在 `flow_background`，保留各窗口原始日期，明确仅作历史背景，不进入当前测量或方向判断。持仓是否有效与流量缺失分别处理，核心完整度分别统计 ETF Holding 与 ETF Flow。
 
-共享证据保留 `etf` dataset 和 `public_etf` 来源标识。Bitbo 分支只证明完整持仓及日期，不要求美元流量历史；校验基金范围与总量，拒绝该来源附带流量或 NAV/AUM 比例。旧 SoSoValue current/history 来源和附件校验仍支持，5D/30D 流量仍需完整的 5/30 个交易日观测。
+共享证据保留 `etf` dataset 和 `public_etf` 来源标识。Bitbo 分支只证明完整持仓及日期，不要求美元流量历史；校验基金范围与总量，拒绝仅由该来源证明的流量或 NAV/AUM 比例。TFTC 流量使用独立的 `public_etf_history` 来源。旧 SoSoValue current/history 来源和附件校验仍支持，5D/30D 流量仍需完整的 5/30 个交易日观测。
 
 更新顺序为 reader 共享契约、采集端；沿用节点状态和自然小时调度。Markdown 只解释协议与边界，程序不解析本文。

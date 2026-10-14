@@ -26,7 +26,7 @@ Binance BTCUSDT 的价格及 quote/taker 数额为 USDT。OI 同时保留 `notio
 
 来源的字典键必须等于 `source_id`；endpoint 必须为 HTTPS 非 IP 主机，`canonical_origin` 必须等于该主机，`access_scope=public`。`as_of`、`retrieved_at`、`generated_at` 都须有时区，且按此顺序不递减。日期精度观测只保留真实观察日期；未来会议/计划日期可单列，但不能充当 source_dates 来解除源时间缺失。宏观复合数据展开各系列的真实 endpoint、字段映射和样本日期；publication 未知时仍降级，不能使用抓取时刻代替。
 
-来源身份还须匹配实现内固定的 `source_id + venue + hostname + path` 注册表；支持当前 Binance、Hyperliquid、CoinGecko、Alternative.me、Bitbo、SoSoValue、DefiLlama、FRED、Yahoo 和 Treasury API。未知来源、任意镜像或不匹配路径降级，不能因自填 Binance 标签被当作对应 API。注册表仅验证协议身份一致性，不认证实际取数，独立核验来源仍为 0。新增 API/镜像须显式更新契约及正向样本。行观测时间不得晚于被引用来源的 retrieved_at，as_of 或日期精度 source_dates 必须覆盖对应行；OI比较实际观测 timestamp，宏观系列和 ETF 历史按各自来源比较真实样本日期，计划时间不参与此比较。
+来源身份还须匹配实现内固定的 `source_id + venue + hostname + path` 注册表；支持当前 Binance、Hyperliquid、CoinGecko、Alternative.me、Bitbo、TFTC、SoSoValue、DefiLlama、FRED、Yahoo 和 Treasury API。未知来源、任意镜像或不匹配路径降级，不能因自填 Binance 标签被当作对应 API。注册表仅验证协议身份一致性，不认证实际取数，独立核验来源仍为 0。新增 API/镜像须显式更新契约及正向样本。行观测时间不得晚于被引用来源的 retrieved_at，as_of 或日期精度 source_dates 必须覆盖对应行；OI比较实际观测 timestamp，宏观系列和 ETF 历史按各自来源比较真实样本日期，计划时间不参与此比较。
 
 Binance Funding 的旧字段 `funding_8h_pct` 表示实际过去 8 小时已结算费率累计；8H/24H 必须有窗口开始边界样本。`fundingInfo` 仅证明当前周期，不倒推历史；混合周期、缺失费率、缺失边界均显式降级。Hyperliquid 保留实际每小时结算记录及既有 8/24 条累计口径；预测费率独立保存。
 
@@ -38,7 +38,9 @@ Treasury Auctions 历史只收录 `auction_date` 不晚于该响应检索 UTC �
 
 ETF 旧 SoSoValue 附件按历史接口真实 `date` 排序、去重，冲突同日值视为缺失；5D/30D 分别要求 5/30 个完整的交易日观测，不能把不足样本的部分和当作完整窗口。窗口日期来自历史末样本，不能使用 current metrics 日期代替。稳定币每资产 current/day/week 样本保留在 `value.history`，原 flow 字段表示供给差；缺源时间保持缺失。
 
-ETF 当前匿名持仓使用 `Bitbo + bitbo.io + /treasuries/us-etfs/`，沿用 `etf` dataset 与 `public_etf` source。此分支只要求有效的 12 基金范围、逐基金 BTC 数量及总量、页面更新日，`source_ids=[public_etf]`，流量历史为空。缺少美元流量不拒绝有效持仓；该来源不能提供 flow 或 NAV/AUM 比例。7D 基准须证明同来源、同范围、相差 7 个日历日及计算结果。旧流量背景不导出为当前测量。完整定义见 [Bitbo mapping](../mappings/bitbo_us_spot_etf.md)。
+ETF 当前匿名持仓使用 `Bitbo + bitbo.io + /treasuries/us-etfs/`，沿用 `etf` dataset 与 `public_etf` source。此分支只要求有效的 12 基金范围、逐基金 BTC 数量及总量、页面更新日。缺少美元流量时 `source_ids=[public_etf]`，流量历史为空；持仓仍可消费。该来源不能证明 flow 或 NAV/AUM 比例。7D 基准须证明同来源、同范围、相差 7 个日历日及计算结果。旧流量背景不导出为当前测量。完整定义见 [Bitbo mapping](../mappings/bitbo_us_spot_etf.md)。
+
+匿名美元流量使用 `TFTC + www.tftc.io + /bitcoin-etf-flows/data.json`，来源标识为 `public_etf_history`，窗口字段必须引用此来源。1D/5D/30D 分别重算 1/5/30 个已确认 NYSE 交易日，每日恰好 12 只基金、数值有限、逐基金之和与总量一致；真正的零有效，null 不补零，缺日/未完整公布不能跳过或回退旧日。`source_dates` 保留实际公布交易日，不能使用 Bitbo 持仓日期；两者可不同且独立降级。缺持仓时可仅保留 TFTC source 和流量，缺长窗口时对应值为 null。TFTC 不能证明持仓或 NAV/AUM 比例；旧 SoSoValue 附件继续按原契约验证。完整映射和公布延迟见 [TFTC mapping](../mappings/tftc_us_spot_etf_flow.md)。
 
 ETF 采集记录的 `flow_1d_source=current|history` 指明日流量实际取值接口，真实零仍属于 current；`current_retrieved_at` 与 `history_retrieved_at` 分别记录响应完成时间。证据 `field_sources.flow_1d_usd` 和该字段的 source_dates 跟随实际来源，历史回退值还须等于历史末样本。旧记录缺少此标记时保持来源未知并产生 `daily_flow_source_unknown`，不得根据数值或日期猜测来源。
 
