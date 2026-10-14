@@ -29,6 +29,7 @@ import market_assets as assets
 import market_history
 import market_observations
 import seller_exhaustion
+import btc_etf
 import market_public
 import market_streams
 import market_common as common
@@ -300,7 +301,6 @@ LIQUIDATION_WS_HEARTBEAT_SAVE_SEC = int(os.getenv("BTC_PUSH_LIQUIDATION_WS_HEART
 LIQUIDATION_COVERAGE_GAP_RESET_SEC = int(os.getenv("BTC_PUSH_LIQUIDATION_COVERAGE_GAP_RESET_SEC", "180"))
 LIQUIDATION_RETENTION_H = int(os.getenv("BTC_PUSH_LIQUIDATION_RETENTION_H", "26"))
 LIQUIDATION_MAX_EVENTS = int(os.getenv("BTC_PUSH_LIQUIDATION_MAX_EVENTS", "100000"))
-SOSOVALUE_BASE_URL = os.getenv("BTC_PUSH_SOSOVALUE_BASE_URL", "https://api.sosovalue.xyz").rstrip("/")
 DEFILLAMA_STABLECOINS_URL = os.getenv(
     "BTC_PUSH_DEFILLAMA_STABLECOINS_URL",
     "https://stablecoins.llama.fi/stablecoins?includePrices=true",
@@ -2187,9 +2187,13 @@ def select_public_records(state, current_snapshot):
             record = None
             for snap in reversed(state.get("public_snapshots") or []):
                 candidate = ((snap.get("public") or {}).get(key) or {})
+                if key == "etf" and btc_etf.is_holdings_source(current) and not btc_etf.is_holdings_source(candidate):
+                    continue
                 if record_has_data(candidate):
                     record = dict(candidate)
                     record["snapshot_used"] = True
+                    if key == "etf":
+                        record["collection_reason"] = current.get("reason")
                     break
             if record is None:
                 record = dict(current) if current else make_unavailable_record(key, "no_snapshot")
@@ -4079,113 +4083,55 @@ def fetch_stablecoin_record():
     return record
 
 
-def sosovalue_metric_value(data, key):
-    item = (data or {}).get(key) or {}
-    return safe_float(item.get("value"))
-
-
-def sosovalue_metric_date(data, key):
-    item = (data or {}).get(key) or {}
-    value = item.get("lastUpdateDate") or item.get("updateDate") or item.get("date")
-    return str(value)[:10] if value else None
-
-
 def fetch_etf_record(state):
-    current = public_post_json(
-        f"{SOSOVALUE_BASE_URL}/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics",
-        {},
-    )
-    current_retrieved_at = time.time()
-    history = public_post_json(
-        f"{SOSOVALUE_BASE_URL}/openapi/v1/etf/us-btc-spot/historicalInflowChart",
-        {},
-    )
-    retrieved_at = time.time()
-    current_data = current.get("data") or {}
-    history_rows = history.get("data") or []
-    history_rows, history_normalization = dated_flow_rows(history_rows)
-    flow_5d, coverage_5d = dated_flow_window(history_rows, 5)
-    flow_30d, coverage_30d = dated_flow_window(history_rows, 30)
-    flow_1d_date = iso_date(sosovalue_metric_date(current_data, "dailyNetInflow"))
-    flow_1d = sosovalue_metric_value(current_data, "dailyNetInflow")
-    flow_1d_source = "current" if flow_1d is not None else None
-    if flow_1d is None and history_rows:
-        flow_1d = history_rows[-1]["totalNetInflow"]
-        flow_1d_date = history_rows[-1]["date"]
-        flow_1d_source = "history" if flow_1d is not None else None
-    holdings_btc = sosovalue_metric_value(current_data, "totalBtcHoldings")
-    total_net_assets = sosovalue_metric_value(current_data, "totalNetAssets")
-    total_net_assets_pct = sosovalue_metric_value(current_data, "totalNetAssetsPercentage")
-    source_date = {
-        "flow_1d": flow_1d_date,
-        "flow_5d": coverage_5d["end_date"],
-        "flow_30d": coverage_30d["end_date"],
-        "holdings": sosovalue_metric_date(current_data, "totalBtcHoldings"),
-        "assets": sosovalue_metric_date(current_data, "totalNetAssets"),
-    }
-    holdings_market_pct = total_net_assets_pct * 100.0 if total_net_assets_pct is not None else None
-    flow_1d_assets_pct = (
-        flow_1d / total_net_assets * 100.0
-        if flow_1d is not None and total_net_assets
-        else None
-    )
-    flow_5d_assets_pct = (
-        flow_5d / total_net_assets * 100.0
-        if flow_5d is not None and total_net_assets
-        else None
-    )
-    flow_30d_assets_pct = (
-        flow_30d / total_net_assets * 100.0
-        if flow_30d is not None and total_net_assets
-        else None
-    )
+    source = "Bitbo US spot BTC ETF holdings"
+    background = btc_etf.flow_background(state)
+    try:
+        parsed = btc_etf.parse_page(public_get_text(btc_etf.ENDPOINT))
+        retrieved_at = time.time()
+        if parsed["source_date"] > datetime.utcfromtimestamp(retrieved_at).date().isoformat():
+            raise ValueError("future_holdings_date")
+    except (requests.RequestException, ValueError) as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        reason = (f"http_{status}" if status is not None else
+                  str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
+        record = make_unavailable_record(source, reason)
+        record.update(endpoint_url=btc_etf.ENDPOINT, venue=btc_etf.VENUE,
+                      flow_status="unavailable", flow_reason="public_net_flow_source_missing",
+                      flow_background=background)
+        return record
+    holdings_btc = parsed["holdings_btc"]
+    source_date = {"holdings": parsed["source_date"]}
     holding_7d_pct = None
-    prev = find_public_record_near(
-        state,
-        "etf",
-        SEVEN_DAY_TARGET_SEC,
-        PUBLIC_SNAPSHOT_7D_TOLERANCE_SEC,
-    )
-    if holdings_btc is not None and prev:
-        prev_holdings = safe_float((((prev.get("record") or {}).get("value") or {}).get("holdings_btc")))
-        holding_7d_pct = pct(holdings_btc, prev_holdings)
-    holding_7d_status = "ok" if holding_7d_pct is not None else "collecting" if holdings_btc is not None else "unavailable"
+    prev = btc_etf.seven_day_basis(state, parsed["source_date"], retrieved_at,
+                                  PUBLIC_SNAPSHOT_7D_TOLERANCE_SEC)
+    if prev:
+        holding_7d_pct = pct(holdings_btc, prev["value"]["holdings_btc"])
+    holding_7d_status = "ok" if holding_7d_pct is not None else "collecting"
     value = {
-        "history": history_rows[-300:],
-        "history_normalization": history_normalization,
-        "history_coverage": {"5d": coverage_5d, "30d": coverage_30d},
-        "flow_1d_usd": flow_1d,
-        "flow_1d_assets_pct": flow_1d_assets_pct,
-        "flow_5d_usd": flow_5d,
-        "flow_5d_assets_pct": flow_5d_assets_pct,
-        "flow_30d_usd": flow_30d,
-        "flow_30d_assets_pct": flow_30d_assets_pct,
+        "history": [],
+        **{key: None for key in btc_etf.FLOW_FIELDS},
         "holdings_btc": holdings_btc,
-        "holdings_market_pct": holdings_market_pct,
+        "holdings_market_pct": None,
         "holding_7d_pct": holding_7d_pct,
         "holding_7d_status": holding_7d_status,
         "holding_7d_reason": None if holding_7d_status == "ok" else "need_7d_snapshot",
         "source_date": source_date,
     }
-    if not value_has_data(value):
-        return make_unavailable_record("SoSoValue BTC spot ETF", "empty_response")
-    record = make_data_record(value, "SoSoValue BTC spot ETF",
-                              status="ok" if coverage_5d["complete"] and coverage_30d["complete"] else "partial",
-                              reason=None if coverage_5d["complete"] and coverage_30d["complete"]
-                              else "incomplete_trading_day_samples")
-    record.update(endpoint_url=f"{SOSOVALUE_BASE_URL}/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics",
-                  venue="SoSoValue", source_as_of_ms=None, retrieved_at=retrieved_at,
-                  current_retrieved_at=current_retrieved_at, history_retrieved_at=retrieved_at,
-                  flow_1d_source=flow_1d_source,
-                  history_endpoint_url=f"{SOSOVALUE_BASE_URL}/openapi/v1/etf/us-btc-spot/historicalInflowChart")
-    stale_reasons = []
-    for key, date_text in source_date.items():
-        stale_reason = etf_source_stale_reason(date_text)
-        if stale_reason:
-            stale_reasons.append(f"{key}:{stale_reason}")
-    record["source_date"] = source_date
-    record["source_stale"] = bool(stale_reasons)
-    record["source_stale_reason"] = " / ".join(stale_reasons) if stale_reasons else None
+    record = make_data_record(value, source, status="partial", reason="public_net_flow_source_missing")
+    stale_reason = etf_source_stale_reason(parsed["source_date"], datetime.fromtimestamp(retrieved_at, TOKYO_TZ))
+    record.update(endpoint_url=btc_etf.ENDPOINT, venue=btc_etf.VENUE,
+                  source_as_of_ms=None, retrieved_at=retrieved_at, time_basis="observation_date",
+                  source_date=source_date, source_stale=bool(stale_reason),
+                  source_stale_reason=stale_reason,
+                  flow_status="unavailable", flow_reason="public_net_flow_source_missing",
+                  flow_background=background, holdings_scope=parsed["holdings_scope"],
+                  holdings_rows=parsed["holdings_rows"])
+    if holding_7d_pct is not None:
+        record["holding_7d_basis"] = {key: copy.deepcopy(prev.get(key)) for key in (
+            "venue", "endpoint_url", "holdings_scope", "holdings_rows", "retrieved_at")}
+        record["holding_7d_basis"].update(holdings_btc=prev["value"]["holdings_btc"],
+                                       source_date=prev["value"]["source_date"]["holdings"])
     return record
 
 
@@ -7423,8 +7369,10 @@ def build_etf_rule_state(payload, state):
     current_etf = ((current_snapshot.get("public") or {}).get("etf") or {})
     etf = selected_etf if record_has_data(selected_etf) else current_etf
 
-    eligible_for_rules = record_is_current(etf)
+    holdings_current = record_is_current(etf)
     raw_value = etf.get("value") or {}
+    eligible_for_rules = holdings_current and any(
+        safe_float(raw_value.get(key)) is not None for key in ("flow_1d_usd", "flow_5d_usd"))
     source_dates = raw_value.get("source_date") or etf.get("source_date") or {}
     if isinstance(source_dates, dict):
         source_date = (
@@ -7436,7 +7384,7 @@ def build_etf_rule_state(payload, state):
         source_date = source_dates
     ineligible_reason = None
     if not eligible_for_rules:
-        if not record_has_data(etf):
+        if holdings_current or not record_has_data(etf):
             ineligible_reason = "missing"
         else:
             ineligible_reason = (
@@ -7481,7 +7429,7 @@ def build_etf_rule_state(payload, state):
     flow_1d = raw_flow_1d if eligible_for_rules else None
     flow_5d = raw_flow_5d if eligible_for_rules else None
     flow_30d = raw_flow_30d if eligible_for_rules else None
-    holding_7d = raw_holding_7d if eligible_for_rules else None
+    holding_7d = raw_holding_7d if holdings_current else None
     holding_stable = None if holding_7d is None else abs(holding_7d) <= 1.0
     flow_5d_allowed = flow_5d is not None and not consistency["flow_5d_inconsistent"]
     if flow_1d is not None:
@@ -7495,7 +7443,7 @@ def build_etf_rule_state(payload, state):
         flow_source = None
     holding_not_deteriorating = False if holding_stable is False else True
     mild_outflow = rule_all(flow_outflow, holding_not_deteriorating)
-    if not record_has_data(etf):
+    if not record_has_data(etf) or holdings_current and not eligible_for_rules:
         status = "data_insufficient"
     elif not eligible_for_rules:
         status = "data_stale"
@@ -8756,6 +8704,10 @@ def build_completeness(payload):
         "macro": "Macro",
     }
     for key, record in public_records.items():
+        if key == "etf" and record.get("collection_reason"):
+            snapshot_notes.append(f"ETF持仓采集失败({record['collection_reason']})")
+        elif key == "etf" and record.get("status") == "unavailable":
+            snapshot_notes.append(f"ETF持仓采集失败({record.get('reason') or 'unknown'})")
         if record_has_data(record) and not record_is_current(record):
             label = labels.get(key, key)
             if record.get("source_stale_reason"):
@@ -9055,6 +9007,12 @@ def etf_source_date(record):
 
 def etf_raw_data_status_line(etf):
     source_date = etf_source_date(etf) or "未知日期"
+    if btc_etf.is_holdings_source(etf):
+        if not record_has_data(etf):
+            return "ETF 流量与持仓缺失，不参与当前判断"
+        if not record_is_current(etf):
+            return f"截至 {source_date}；ETF 持仓过期，仅作背景；美元流量缺失"
+        return f"截至 {source_date}；ETF 持仓可作日级背景；美元流量缺失"
     if not record_has_data(etf):
         return "ETF 数据缺失，不参与当前判断"
     if not record_is_current(etf):
@@ -9064,6 +9022,8 @@ def etf_raw_data_status_line(etf):
 
 def format_etf_block(payload):
     etf = (payload.get("public_records") or {}).get("etf") or {}
+    if btc_etf.is_holdings_source(etf):
+        return format_etf_holdings_only(etf) + [etf_raw_data_status_line(etf)]
     mark = record_mark(etf)
     return [
         (
@@ -9081,6 +9041,31 @@ def format_etf_block(payload):
         ),
         etf_raw_data_status_line(etf),
     ]
+
+
+def format_etf_holdings_only(etf):
+    lines = ["BTC现货ETF：美元净流量缺失（1D/5D/30D）"]
+    background = etf.get("flow_background") or {}
+    values = background.get("value") or {}
+    dates = background.get("source_date") or {}
+    if isinstance(dates, dict):
+        historical = []
+        for days in (1, 5, 30):
+            key = f"flow_{days}d"
+            amount, day = values.get(key + "_usd"), dates.get(key)
+            if safe_float(amount) is not None and day:
+                historical.append(f"{days}D {format_signed_money_change(amount)}（{day}）")
+        if historical:
+            lines.append("ETF流量历史：" + " | ".join(historical) + "，仅作背景")
+    amount = safe_float(record_value(etf, "holdings_btc"))
+    if amount is None:
+        lines.append(f"ETF持仓：数据不足（Bitbo，{etf.get('reason') or 'unknown'}）")
+    else:
+        quantity = f"{amount:,.8f}".rstrip("0").rstrip(".")
+        note = "，已过期，仅作背景" if not record_is_current(etf) else ""
+        lines.append(f"ETF持仓：{quantity} BTC | 7D {format_etf_holding_7d(etf)}"
+                     f"（Bitbo，截至 {etf_source_date(etf) or '未知日期'}{note}）")
+    return lines
 
 
 def format_spot_block(payload):
@@ -9931,7 +9916,7 @@ def plain_etf_flow_line(etf):
     if (etf or {}).get("eligible_for_rules") is False:
         if (etf or {}).get("status") == "data_stale":
             return f"⚪ ETF 数据过期，仅作背景，不参与当前判断（截至 {source_date}）"
-        return "⚪ ETF 日级背景数据不足"
+        return "⚪ ETF 流量数据不足"
     if (etf or {}).get("flow_outflow_rule") is True:
         return f"❌ ETF 最近交易日偏流出（截至 {source_date}）"
     if (etf or {}).get("flow_outflow_rule") is False:
@@ -11429,7 +11414,7 @@ def format_plain_short_funds_block(payload):
             f" | 7D {format_signed_money_change(record_value(stablecoin, 'flow_7d_usd'))}"
             f"{record_mark(stablecoin)}"
         ),
-        etf_line,
+        *(format_etf_holdings_only(etf) if btc_etf.is_holdings_source(etf) else [etf_line]),
         (
             f"合约成本：{funding_text}{record_mark(funding)}"
             f" | 合约价较现货 {format_pct_value(record_value(basis, 'basis_pct'), 3)}{record_mark(basis)}"
@@ -11786,7 +11771,7 @@ def format_plain_short_data_block(payload):
     if not alerts:
         return [f"本标的采集自检通过（策略仍需独立核验）｜{derivatives_text}"]
     return [
-        "部分数据缺失、过期或时间没有对齐，本次结论已自动降低确定性。",
+        "数据存在以下缺口，本次结论已降低确定性。",
         *alerts,
         f"来源：{derivatives_text}",
     ]

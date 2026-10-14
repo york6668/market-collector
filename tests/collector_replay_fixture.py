@@ -21,6 +21,23 @@ GENERATED_AT = "2026-09-04T06:00:10+00:00"
 CASES = ("valid", "missing_spot", "half_hour_spot", "misaligned_spot")
 
 
+def holdings_only_record(day="2026-09-03", retrieved_at=(END_MS + 1000) / 1000, amount=1.00000001):
+    """Small synthetic balances for the anonymous holding-only contract."""
+    import btc_etf
+    rows = [{"symbol": symbol, "holdings_btc": amount} for symbol in btc_etf.FUNDS]
+    return {"status": "partial", "source": "Bitbo US spot BTC ETF holdings",
+            "venue": btc_etf.VENUE, "endpoint_url": btc_etf.ENDPOINT,
+            "retrieved_at": retrieved_at, "updated_at": int(retrieved_at),
+            "source_as_of_ms": None, "time_basis": "observation_date", "source_stale": False,
+            "holdings_scope": list(btc_etf.FUNDS), "holdings_rows": rows,
+            "flow_status": "unavailable", "reason": "public_net_flow_source_missing",
+            "source_date": {"holdings": day},
+            "value": {"history": [], **{key: None for key in btc_etf.FLOW_FIELDS},
+                      "holdings_btc": sum(row["holdings_btc"] for row in rows),
+                      "holdings_market_pct": None, "holding_7d_pct": None,
+                      "holding_7d_status": "collecting", "source_date": {"holdings": day}}}
+
+
 def make_payload(case="valid"):
     """Build 240 source bars; OI timestamps remain actual synthetic source stamps."""
     if case not in CASES:

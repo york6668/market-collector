@@ -35,6 +35,26 @@ class Replay(unittest.TestCase):
         obs=self.reader.observations()[0]
         self.assertEqual(0,obs["independent_verified_sources"])
         self.assertNotIn("mechanical_observation",obs)
+    def test_holding_only_attachment_reaches_real_reader(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import make_payload, holdings_only_record, GENERATED_AT
+        for version in (1, 2):
+            payload = make_payload()
+            payload["public_records"]["etf"] = holdings_only_record()
+            payload["evidence_version"] = version
+            self.bundle = build_bundle(payload, self.text, "holding-only:%d" % version, GENERATED_AT)
+            self.raw = encode_bundle(self.bundle)
+            parent = version * 10
+            self.reader.ingest_update(self.msg(parent, self.text))
+            self.reader.ingest_update(self.msg(parent + 1, parent=parent))
+            result = self.reader.process_pending(lambda _: self.raw)
+            self.assertIn(result[0]["status"], ("valid_auxiliary", "degraded_auxiliary"))
+            observation = self.reader.observations()[-1]
+            ds = observation["datasets"]["etf"]
+            self.assertAlmostEqual(12.00000012, ds["values"]["holdings_btc"])
+            self.assertIsNone(ds["values"]["flow_1d_usd"])
+            self.assertNotIn("public_etf_history", observation["sources"])
     def test_attachment_before_parent_and_restart(self):
         self.reader.ingest_update(self.msg(2,parent=1))
         self.assertEqual("pending_text",self.reader.process_pending(lambda _:self.raw)[0]["status"])

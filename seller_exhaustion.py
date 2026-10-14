@@ -256,8 +256,10 @@ def project(item, cutoff, reasons=None):
         clean['inputs'] = {kind: {**{k: raw[k] for k in ('value', 'retrieved_at_ms', 'source_as_of_ms')},
                          'provenance': {k: raw['provenance'][k] for k in ('endpoint_url', 'access_scope', 'unit')}}
                            for kind, raw in row['inputs'].items()}
+        # problems() recalculates to validate the producer. Projection preserves
+        # its validated values: another Python/libm must not revise history.
+        clean.update({key: row[key] for key in ('supply_in_profit', 'volatility_30d', 'value')})
         rows.append(clean)
-    rows = derive(rows)
     sources = {}
     for kind, (path, _, unit) in INPUTS.items():
         samples = [r['inputs'][kind] for r in rows if kind in r['inputs']]

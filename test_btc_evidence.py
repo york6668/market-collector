@@ -548,5 +548,77 @@ class EvidenceHardeningTest(unittest.TestCase):
         self.assertIn("daily_flow_history_mismatch", evidence.validate_bundle(bundle, text)["dataset_reasons"]["etf"])
 
 
+class BitboHoldingsContractTests(unittest.TestCase):
+    def test_current_reader_nonobject_guard_is_preserved(self):
+        for raw in ("null", "[]", "0", '"invalid"'):
+            with self.assertRaisesRegex(ValueError, "evidence_bundle_must_be_object"):
+                evidence.decode_bundle(raw)
+
+    def bundle(self, amount=1.00000001, version=1):
+        from pathlib import Path
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent / "tests"))
+        from collector_replay_fixture import make_payload, holdings_only_record, GENERATED_AT
+        payload = make_payload()
+        record = holdings_only_record(amount=amount)
+        record["flow_background"] = {"value": {"flow_1d_usd": 99}, "source_date": {"flow_1d": "2026-08-20"}}
+        payload["public_records"]["etf"] = record
+        payload["evidence_version"] = version
+        return evidence.build_bundle(payload, "test", "etf-test", GENERATED_AT)
+
+    def rehash(self, bundle):
+        bundle["bundle_id"] = "btc:" + hashlib.sha256(evidence.canonical_bytes(
+            {key: value for key, value in bundle.items() if key != "bundle_id"})).hexdigest()
+
+    def test_holdings_only_v1_v2_projection_does_not_require_flow_history(self):
+        for version in (1, 2):
+            for amount in (0, 1.00000001):
+                bundle = self.bundle(amount, version)
+                self.assertNotIn("etf", evidence.validate_bundle(bundle, "test")["dataset_reasons"])
+                projection = evidence.auxiliary_observation(bundle, "test")
+                ds = projection["datasets"]["etf"]
+                self.assertEqual(["public_etf"], ds["source_ids"])
+                self.assertAlmostEqual(amount * 12, ds["values"]["holdings_btc"])
+                self.assertIsNone(ds["values"]["flow_1d_usd"])
+                self.assertNotIn("public_etf_history", projection["sources"])
+                self.assertNotIn("flow_background", ds)
+
+    def test_invalid_holdings_and_attempted_flow_or_nav_degrade_etf(self):
+        for key, value in (("flow_1d_usd", 0), ("flow_5d_usd", 1), ("flow_30d_usd", 1),
+                           ("holdings_market_pct", 1), ("flow_1d_assets_pct", 0),
+                           ("holdings_btc", 999), ("holdings_btc", -1), ("holdings_btc", True)):
+            bundle = self.bundle(); bundle["datasets"]["etf"]["values"][key] = value
+            self.rehash(bundle)
+            validation = evidence.validate_bundle(bundle, "test")
+            self.assertIn("etf", validation["dataset_reasons"])
+            projection = evidence.auxiliary_observation(bundle, "test")
+            self.assertIn("etf", projection["validation"]["dataset_reasons"])
+        for change in ({"holdings_scope": ["IBIT"]}, {"holdings_rows": []}, {"rows": [{"date": "2026-09-03", "totalNetInflow": 1}]},
+                       {"field_sources": {"holdings_btc": ["public_etf_history"]}}):
+            bundle = self.bundle(); bundle["datasets"]["etf"].update(change); self.rehash(bundle)
+            self.assertIn("etf", evidence.validate_bundle(bundle, "test")["dataset_reasons"])
+
+    def test_missing_date_stale_and_cross_source_seven_day_are_rejected(self):
+        for mutation in (lambda b: b["sources"]["public_etf"].update(source_dates={}),
+                         lambda b: b["datasets"]["etf"]["quality"].update(source_stale=True),
+                         lambda b: b["datasets"]["etf"]["values"].update(holding_7d_pct=1)):
+            bundle = self.bundle(); mutation(bundle); self.rehash(bundle)
+            self.assertIn("etf", evidence.validate_bundle(bundle, "test")["dataset_reasons"])
+        from collector_replay_fixture import holdings_only_record
+        baseline = holdings_only_record("2026-08-27", amount=1)
+        basis = {key: baseline[key] for key in ("venue", "endpoint_url", "holdings_scope", "holdings_rows", "retrieved_at")}
+        basis.update(source_date="2026-08-27", holdings_btc=12)
+        bundle = self.bundle()
+        ds = bundle["datasets"]["etf"]
+        ds["values"]["holding_7d_pct"] = (ds["values"]["holdings_btc"] / 12 - 1) * 100
+        ds["holding_7d_basis"] = basis
+        self.rehash(bundle)
+        self.assertNotIn("etf", evidence.validate_bundle(bundle, "test")["dataset_reasons"])
+        for change in ({"venue": "SoSoValue"}, {"source_date": "2026-08-26"}, {"holdings_scope": ["IBIT"]}):
+            mutated = copy.deepcopy(bundle)
+            mutated["datasets"]["etf"]["holding_7d_basis"].update(change); self.rehash(mutated)
+            self.assertIn("etf", evidence.validate_bundle(mutated, "test")["dataset_reasons"])
+
+
 if __name__ == "__main__":
     unittest.main()

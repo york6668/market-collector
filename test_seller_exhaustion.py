@@ -78,6 +78,20 @@ class SellerExhaustionTests(unittest.TestCase):
         self.assertIn('source_stale',sec.problems(item,NOW))
         self.assertTrue(item['rows'][-1]['supply_in_profit'])
 
+    def test_projection_validates_but_does_not_replace_producer_rounding(self):
+        item = self.collect()
+        last = item['rows'][-1]
+        for key in ('volatility_30d', 'value'):
+            last[key] = math.nextafter(last[key], math.inf)
+        self.assertEqual([], sec.problems(item, NOW))
+        projected = sec.project(item, NOW)['datasets'][sec.NAME]
+        self.assertEqual(projected['rows'], item['rows'])
+        self.assertEqual(projected['values']['latest'], last['value'])
+        altered = copy.deepcopy(item)
+        altered['rows'][-1]['value'] *= 1.1
+        self.assertIn('daily_calculation_mismatch', sec.problems(altered, NOW))
+        self.assertEqual(sec.project(altered, NOW)['datasets'][sec.NAME]['status'], 'invalid')
+
     def test_null_revision_removes_value_without_zero_filling_or_rewriting_past(self):
         self.collect()
         revised = raw('profit');revised[-1][sec.INPUTS['profit'][1]]=None

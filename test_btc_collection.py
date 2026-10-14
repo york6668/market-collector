@@ -196,41 +196,35 @@ class CollectionAdapterTest(unittest.TestCase):
         with patch.object(bot, "HYPERLIQUID_MODE", "shadow"), patch.object(bot, "get_btc_oi", return_value=(7, 100, 700)):
             self.assertEqual(7, bot.get_current_derivatives_market({}, [], 100)["oi_btc"])
 
-    def test_etf_fetch_history_date_is_independent_from_current_metrics(self):
+    def test_legacy_etf_export_dates_and_trading_day_sums_remain_independent(self):
         history = [{"date": (datetime(2026, 8, 1)+timedelta(days=i)).strftime("%Y-%m-%d"),
                     "totalNetInflow": 10} for i in range(30)]
-        current = {"dailyNetInflow": {"value": 5, "lastUpdateDate": "2026-09-01"},
-                   "totalBtcHoldings": {"value": 1, "lastUpdateDate": "2026-09-01"},
-                   "totalNetAssets": {"value": 1000, "lastUpdateDate": "2026-09-01"}}
-        def post(url, payload):
-            return {"data": history if url.endswith("historicalInflowChart") else current}
-        with patch.object(bot, "public_post_json", side_effect=post):
-            record = bot.fetch_etf_record({})
-        self.assertEqual(50, record["value"]["flow_5d_usd"])
-        self.assertEqual(300, record["value"]["flow_30d_usd"])
-        self.assertEqual("2026-08-30", record["source_date"]["flow_30d"])
-        self.assertEqual("2026-09-01", record["source_date"]["flow_1d"])
+        record = self.legacy_etf(history, 5, "current", "2026-09-01")
+        bundle = evidence.build_bundle({"public_records": {"etf": record}}, "test", "test",
+                                       "2026-09-04T06:00:02+00:00")
+        self.assertNotIn("etf", evidence.validate_bundle(bundle, "test")["dataset_reasons"])
+        self.assertEqual("2026-08-30", bundle["sources"]["public_etf_history"]["source_dates"]["flow_30d"])
+        self.assertEqual("2026-09-01", bundle["sources"]["public_etf"]["source_dates"]["flow_1d"])
 
-    def test_etf_daily_fallback_exports_actual_source_and_retains_zero(self):
+    @staticmethod
+    def legacy_etf(history, daily, flow_source, day):
+        latest = history[-1]["date"]
+        return {"venue": "SoSoValue", "endpoint_url": "https://api.sosovalue.xyz/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics",
+                "history_endpoint_url": "https://api.sosovalue.xyz/openapi/v1/etf/us-btc-spot/historicalInflowChart",
+                "retrieved_at": 1788501601, "history_retrieved_at": 1788501602, "flow_1d_source": flow_source,
+                "source_date": {"flow_1d": day, "flow_5d": latest, "flow_30d": latest},
+                "value": {"history": history, "flow_1d_usd": daily,
+                          "flow_5d_usd": sum(row["totalNetInflow"] for row in history[-5:]),
+                          "flow_30d_usd": sum(row["totalNetInflow"] for row in history[-30:])}}
+
+    def test_legacy_etf_daily_provenance_retains_zero(self):
         history = [{"date": "2026-09-03", "totalNetInflow": 17}]
         for current_value, expected_value, expected_source, expected_date in (
                 (None, 17, "history", "2026-09-03"),
                 (0, 0, "current", "2026-09-04"),
                 (5, 5, "current", "2026-09-04")):
             with self.subTest(current=current_value):
-                current = {"dailyNetInflow": {"value": current_value, "lastUpdateDate": "2026-09-04"}}
-                clock = [1788501600.0]
-                def post(url, payload):
-                    clock[0] += 1
-                    return {"data": history if url.endswith("historicalInflowChart") else current}
-                with patch.object(bot, "public_post_json", side_effect=post), \
-                     patch.object(bot.time, "time", side_effect=lambda: clock[0]):
-                    record = bot.fetch_etf_record({})
-                self.assertEqual(expected_value, record["value"]["flow_1d_usd"])
-                self.assertEqual(expected_source, record["flow_1d_source"])
-                self.assertEqual(expected_date, record["source_date"]["flow_1d"])
-                self.assertEqual(1788501601, record["current_retrieved_at"])
-                self.assertEqual(1788501602, record["history_retrieved_at"])
+                record = self.legacy_etf(history, expected_value, expected_source, expected_date)
                 bundle = evidence.build_bundle({"public_records": {"etf": record}}, "test", "test",
                                                "2026-09-04T06:00:02+00:00")
                 sid = "public_etf_history" if expected_source == "history" else "public_etf"

@@ -3015,7 +3015,7 @@ class EtfFreshnessBoundaryTest(unittest.TestCase):
         self.assertEqual("data_insufficient", state["status"])
         self.assertEqual("missing", state["ineligible_reason"])
         self.assertIsNone(state["flow_outflow_rule"])
-        self.assertEqual("⚪ ETF 日级背景数据不足", bot.plain_etf_flow_line(state))
+        self.assertEqual("⚪ ETF 流量数据不足", bot.plain_etf_flow_line(state))
 
 
 class StablecoinDataQualityTest(unittest.TestCase):

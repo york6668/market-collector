@@ -11,8 +11,9 @@ import ipaddress
 import re
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
+import btc_etf
 
 SCHEMA = "BTC_COLLECTOR_EVIDENCE_V1"
 MAX_BYTES = 5 * 1024 * 1024
@@ -208,6 +209,14 @@ def _build_btc_bundle(payload, report_text, report_id, generated_at, full_report
             ds["units"] = {"flow": "USD", "holdings": "BTC"}
             ds["rows"] = value.get("history") or []
             ds["values"] = {k: v for k, v in value.items() if k != "history"}
+            if btc_etf.is_holdings_source(record):
+                ds["formula"] = "sum BTC balances of the 12 agreed US spot funds; no USD net-flow inference"
+                ds["holdings_scope"] = record.get("holdings_scope")
+                ds["holdings_rows"] = record.get("holdings_rows")
+                ds["holding_7d_basis"] = record.get("holding_7d_basis")
+                ds["field_sources"] = {"holdings_btc": [sid], "holding_7d_pct": [sid]}
+                datasets[name] = ds
+                continue
             history_sid = sid + "_history"
             flow_source = record.get("flow_1d_source")
             dates = source_dates if isinstance(source_dates, dict) else {}
@@ -346,7 +355,8 @@ _SOURCE_CONTRACTS = {
     "public_basis": [("Binance", _BINANCE, "/fapi/v1/premiumIndex"), _HL],
     "public_binance_basis_shadow": [("Binance", _BINANCE, "/fapi/v1/premiumIndex")],
     "public_hyperliquid_basis": [_HL],
-    "public_etf": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics")],
+    "public_etf": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics"),
+                   (btc_etf.VENUE, "bitbo.io", "/treasuries/us-etfs/")],
     "public_etf_history": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/historicalInflowChart")],
     "public_stablecoin": [("DefiLlama", "stablecoins.llama.fi", "/stablecoins")],
     "market_current": [("Binance Spot 24hr", "api.binance.com", "/api/v3/ticker/24hr"),
@@ -886,7 +896,8 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
     elif name == "macro":
         if any(not sid.startswith("macro_") for sid in refs):
             problems.append("dataset_source_mismatch")
-    elif set(refs) != _DATASET_SOURCE_IDS[name]:
+    elif set(refs) != ({"public_etf"} if name == "etf" and
+            btc_etf.is_holdings_source(sources.get("public_etf") or {}) else _DATASET_SOURCE_IDS[name]):
         problems.append("dataset_source_mismatch")
     rows = ds.get("rows")
     requires_window = name in _FIXED_WINDOWS or name in _FUNDING_NAMES
@@ -945,7 +956,9 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
         if (not all(_number(v) for v in (mark, index, basis)) or mark <= 0 or index <= 0
                 or not math.isclose(basis, (mark - index) / index * 100, rel_tol=1e-9, abs_tol=1e-8)):
             problems.append("basis_value_mismatch")
-    if name == "etf":
+    if name == "etf" and btc_etf.is_holdings_source(sources.get("public_etf") or {}):
+        problems.extend(_etf_holdings_problems(ds, sources["public_etf"]))
+    elif name == "etf":
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             problems.append("invalid_rows")
         else:
@@ -977,6 +990,42 @@ def _dataset_problems(name, ds, sources, source_errors, generated):
     problems.extend(_data_date_problems(ds, generated))
     problems.extend(_observation_time_problems(name, ds, sources, refs))
     return sorted(set(problems))
+
+
+def _etf_holdings_problems(ds, source):
+    values = ds.get("values") if isinstance(ds.get("values"), dict) else {}
+    problems = []
+    try:
+        btc_etf.validate_holdings(ds.get("holdings_scope"), ds.get("holdings_rows"), values.get("holdings_btc"))
+    except ValueError as exc:
+        problems.append(str(exc))
+    if ds.get("rows") != [] or any(values.get(k) is not None for k in (
+            *btc_etf.FLOW_FIELDS, "holdings_market_pct")):
+        problems.append("holdings_source_cannot_supply_flow_or_assets")
+    field_sources = ds.get("field_sources") or {}
+    if not isinstance(field_sources, dict) or field_sources.get("holdings_btc") != ["public_etf"]:
+        problems.append("holdings_source_unknown")
+    day = (source.get("source_dates") or {}).get("holdings")
+    if not isinstance(day, str) or _date_leaves(day) is None:
+        problems.append("missing_holdings_date")
+    if (values.get("source_date") or {}).get("holdings") != day:
+        problems.append("holdings_date_mismatch")
+    change = values.get("holding_7d_pct")
+    if change is not None:
+        basis = ds.get("holding_7d_basis") or {}
+        try:
+            if not btc_etf.is_holdings_source(basis):
+                raise ValueError("holding_7d_source_mismatch")
+            btc_etf.validate_holdings(basis.get("holdings_scope"), basis.get("holdings_rows"), basis.get("holdings_btc"))
+            prior_day = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).date().isoformat()
+            if basis.get("source_date") != prior_day or basis["holdings_btc"] <= 0:
+                raise ValueError("invalid_holding_7d_basis")
+            expected = (values["holdings_btc"] / basis["holdings_btc"] - 1) * 100
+            if not _number(change) or not math.isclose(change, expected, rel_tol=1e-9, abs_tol=1e-8):
+                raise ValueError("holding_7d_value_mismatch")
+        except (ValueError, TypeError, KeyError) as exc:
+            problems.append(str(exc) if isinstance(exc, ValueError) else "invalid_holding_7d_basis")
+    return problems
 
 
 def _observation_time_problems(name, ds, sources, refs):
@@ -1093,8 +1142,11 @@ def decode_bundle(data):
             if not _number(result):
                 raise ValueError("nonfinite_json")
             return result
-        return json.loads(data, object_pairs_hook=unique_pairs, parse_float=finite_float,
-                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite_json")))
+        result = json.loads(data, object_pairs_hook=unique_pairs, parse_float=finite_float,
+                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite_json")))
+        if not isinstance(result, dict):
+            raise ValueError("evidence_bundle_must_be_object")
+        return result
     except (RecursionError, OverflowError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid_evidence_json") from exc
 
