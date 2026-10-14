@@ -4152,6 +4152,8 @@ def fetch_etf_record(state):
         retrieved_at = time.time()
         stale, expected = btc_etf_flow.freshness(parsed["source_date"], retrieved_at,
             ETF_SOURCE_READY_ET_HOUR, ETF_SOURCE_STALE_GRACE_DAYS)
+        if stale in ("future_flow_date", "flow_session_not_closed", "flow_calendar_year_unverified", "flow_non_trading_date"):
+            raise ValueError(stale)
         flow.update(retrieved_at=retrieved_at, source_date=parsed["source_date"],
                     expected_source_date=expected, source_stale=bool(stale),
                     source_stale_reason=stale, flow_scope=parsed["flow_scope"],
@@ -9129,9 +9131,11 @@ def format_etf_holdings_only(etf):
                  + f"（TFTC，截至 {flow.get('source_date') or '未知日期'}）"]
     else:
         lines = ["BTC现货ETF：美元净流量缺失（1D/5D/30D）"]
+    if any(amount is not None for amount in current_flows):
+        lines.append("ETF流量来源：TFTC " + btc_etf_flow.PAGE)
     background = etf.get("flow_background") or {}
     if flow.get("source_stale") and flow.get("value"):
-        background = {"value": flow["value"], "source_date": {
+        background = {"venue": flow.get("venue"), "value": flow["value"], "source_date": {
             f"flow_{days}d": flow.get("source_date") for days in btc_etf_flow.WINDOWS}}
     values = background.get("value") or {}
     dates = background.get("source_date") or {}
@@ -9144,6 +9148,8 @@ def format_etf_holdings_only(etf):
                 historical.append(f"{days}D {format_signed_money_change(amount)}（{day}）")
         if historical and not any(amount is not None for amount in current_flows):
             lines.append("ETF流量历史：" + " | ".join(historical) + "，仅作背景")
+            if background.get("venue") == btc_etf_flow.VENUE:
+                lines.append("ETF流量来源：TFTC " + btc_etf_flow.PAGE)
     amount = safe_float(record_value(etf, "holdings_btc"))
     holding = etf.get("holdings_record") or {}
     if amount is None and holding.get("source_stale"):

@@ -103,6 +103,8 @@ class FlowTests(unittest.TestCase):
         self.assertIsNotNone(bot.current_record_value(no_holding, "flow_1d_usd"))
         self.assertTrue(bot.build_etf_rule_state({"public_records": {"etf": no_holding}}, {})["eligible_for_rules"])
         future_flow = self.fetch(flow_response(end="2026-09-08"))
+        self.assertEqual("future_flow_date", future_flow["flow_reason"])
+        self.assertFalse(any("ETF流量历史" in line for line in bot.format_etf_holdings_only(future_flow)))
         bundle = btc_evidence.build_bundle({"public_records": {"etf": future_flow}}, "future flow", "test",
                                          btc_evidence.iso_time(NOW))
         self.assertNotIn("etf", btc_evidence.validate_bundle(bundle, "future flow")["dataset_reasons"])
@@ -114,12 +116,14 @@ class FlowTests(unittest.TestCase):
         text = "\n".join(bot.format_etf_holdings_only(stale_flow))
         self.assertIn("2026-08-31", text)
         self.assertIn("仅作背景", text)
+        self.assertIn(flow.PAGE, text)
         stale_hold = self.fetch(html=page(date="August 1, 2026"))
         self.assertIsNone(bot.current_record_value(stale_hold, "holdings_btc"))
         self.assertIsNotNone(bot.current_record_value(stale_hold, "flow_1d_usd"))
         mismatch = self.fetch(flow_response(end="2026-09-02"))
         text = "\n".join(bot.format_etf_holdings_only(mismatch))
         self.assertIn("TFTC，截至 2026-09-02", text)
+        self.assertIn(flow.PAGE, text)
         self.assertIn("Bitbo，截至 2026-09-03", text)
         self.assertTrue(any("日期未对齐" in note for note in bot.build_completeness({"public_records": {"etf": mismatch}})["snapshot_notes"]))
 
