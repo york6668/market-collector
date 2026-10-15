@@ -208,7 +208,7 @@ MACRO_CACHE_TTL_SEC = int(os.getenv(
     "BTC_PUSH_MACRO_CACHE_TTL_SEC",
     os.getenv("BTC_PUSH_V5_MACRO_CACHE_TTL_SEC", str(6 * 3600)),
 ))
-MACRO_CACHE_SCHEMA_REVISION = 11
+MACRO_CACHE_SCHEMA_REVISION = 12
 MACRO_SOURCE_STALE_SEC = int(os.getenv(
     "BTC_PUSH_MACRO_SOURCE_STALE_SEC",
     os.getenv("BTC_PUSH_V5_MACRO_SOURCE_STALE_SEC", str(96 * 3600)),
@@ -2666,9 +2666,9 @@ def fiscaldata_latest_record_date(path, sort_field):
     return (rows[0] or {}).get(sort_field) if rows else None
 
 
-def fetch_treasury_mts_ytd_value():
+def fetch_treasury_mts_ytd_value(record_date=None):
     path = "v1/accounting/mts/mts_table_1"
-    record_date = fiscaldata_latest_record_date(path, "record_date")
+    record_date = record_date or fiscaldata_latest_record_date(path, "record_date")
     if not record_date:
         return {"available": False, "reason": "missing_mts_date"}
     data = fiscaldata_get_json(
@@ -2680,21 +2680,24 @@ def fetch_treasury_mts_ytd_value():
         },
     )
     rows = data.get("data") or []
+    period = parse_ymd(record_date)
+    if not period:
+        return {"available": False, "reason": "invalid_mts_date"}
+    fiscal_year = period.year + (period.month >= 10)
+    parents = {str(row.get("classification_id")) for row in rows
+               if (row.get("classification_desc") or "").strip() == f"FY {fiscal_year}"}
     ytd_rows = [
         row for row in rows
         if (row.get("classification_desc") or "").strip().lower() == "year-to-date"
+        and str(row.get("parent_id")) in parents
     ]
-    preferred = None
-    for row in ytd_rows:
-        if str(row.get("line_code_nbr") or "") == "140":
-            preferred = row
-            break
-    row = preferred or (ytd_rows[0] if ytd_rows else None)
-    if not row:
+    if len(ytd_rows) != 1:
         return {"available": False, "reason": "missing_ytd_row", "record_date": record_date}
+    row = ytd_rows[0]
     return {
         "available": True,
         "record_date": record_date,
+        "fiscal_year": fiscal_year,
         "receipts_ytd_usd": safe_float(row.get("current_month_gross_rcpt_amt")),
         "outlays_ytd_usd": safe_float(row.get("current_month_gross_outly_amt")),
         "deficit_ytd_usd": safe_float(row.get("current_month_dfct_sur_amt")),
@@ -2704,9 +2707,9 @@ def fetch_treasury_mts_ytd_value():
     }
 
 
-def fetch_treasury_interest_expense_value():
+def fetch_treasury_interest_expense_value(record_date=None):
     path = "v2/accounting/od/interest_expense"
-    record_date = fiscaldata_latest_record_date(path, "record_date")
+    record_date = record_date or fiscaldata_latest_record_date(path, "record_date")
     if not record_date:
         return {"available": False, "reason": "missing_interest_date"}
     data = fiscaldata_get_json(
@@ -2873,14 +2876,25 @@ def fetch_treasury_buyback_value():
     if not rows:
         return {"available": False, "reason": "empty_buyback_results"}
 
-    rows.sort(key=lambda row: row.get("operation_date") or "", reverse=True)
-    latest = rows[0]
-    latest_date = latest.get("operation_date")
-    latest_dt = parse_ymd(latest_date)
     today = datetime.now(US_EASTERN_TZ or TOKYO_TZ).date()
+    # Announcements share this endpoint with results. A scheduled date or a
+    # maximum amount does not establish a completed buyback.
+    completed = []
+    for row in rows:
+        operation_date = parse_ymd(row.get("operation_date"))
+        accepted = safe_float(row.get("total_par_amt_accepted"))
+        if (operation_date and operation_date.date() <= today
+                and accepted is not None and math.isfinite(accepted) and accepted >= 0):
+            completed.append(row)
+    if not completed:
+        return {"available": False, "reason": "no_completed_buyback_results"}
+    completed.sort(key=lambda row: row["operation_date"], reverse=True)
+    latest = completed[0]
+    latest_date = latest["operation_date"]
+    latest_dt = parse_ymd(latest_date)
     cutoff = today - timedelta(days=max(1, TREASURY_BUYBACK_LOOKBACK_DAYS))
     recent_rows = []
-    for row in rows:
+    for row in completed:
         dt = parse_ymd(row.get("operation_date"))
         if dt and cutoff <= dt.date() <= today:
             recent_rows.append(row)
@@ -2908,7 +2922,7 @@ def fetch_treasury_buyback_value():
         "repeated_rule": True if len(recent_rows) >= 2 else False,
         "days_since_latest": days_since_latest,
         "source": "Treasury Fiscal Data Buybacks Operations",
-        "history": [raw_series_receipt(rows, 'operation_date', 'treasury_buyback',
+        "history": [raw_series_receipt(completed, 'operation_date', 'treasury_buyback',
                     f"{FISCALDATA_API_BASE_URL}/{path}", time.time(), ['treasury_buyback', 'treasury_buyback_recent_count', 'treasury_buyback_total_par_accepted', 'treasury_buyback_scale_status'])],
     }
 
@@ -3012,8 +3026,11 @@ def fetch_fred_fiscal_series_value():
             missing[label] = str(exc)[:80]
     interest = safe_float(values.get("interest_payments"))
     receipts = safe_float(values.get("federal_receipts"))
-    if interest is not None and receipts:
+    if (interest is not None and receipts and values.get("interest_payments_date")
+            and values.get("interest_payments_date") == values.get("federal_receipts_date")):
         values["interest_revenue_ratio_pct"] = interest / receipts * 100.0
+    elif interest is not None and receipts:
+        missing["利息/收入"] = "fred_period_mismatch"
     return {
         "values": values,
         "history": history,
@@ -3078,11 +3095,14 @@ def fetch_fiscal_proxy_value(us10y=None):
         "debt_gdp_pct": safe_float((fred.get("values") or {}).get("debt_gdp")),
         "interest_revenue_ratio_pct": safe_float((fred.get("values") or {}).get("interest_revenue_ratio_pct")),
         "interest_revenue_ratio_source": "FRED annualized federal receipts",
+        "interest_revenue_ratio_date": (fred.get("values") or {}).get("interest_payments_date"),
         "missing": dict(fred.get("missing") or {}),
         "source_date": dict(fred.get("source_date") or {}),
         "sources": {"fred": fred.get("source")},
     }
 
+    mts = {}
+    interest = {}
     try:
         mts = fetch_treasury_mts_ytd_value()
         if mts.get("available"):
@@ -3114,11 +3134,44 @@ def fetch_fiscal_proxy_value(us10y=None):
     except Exception as exc:
         fiscal["missing"]["Treasury Interest Expense"] = str(exc)[:80]
 
-    receipts_ytd = safe_float(fiscal.get("treasury_receipts_ytd_usd"))
-    interest_ytd = safe_float(fiscal.get("treasury_interest_fytd_usd"))
-    if receipts_ytd and interest_ytd is not None:
-        fiscal["interest_revenue_ratio_pct"] = interest_ytd / receipts_ytd * 100.0
-        fiscal["interest_revenue_ratio_source"] = "Treasury Fiscal Data YTD"
+    if mts.get("available") and interest.get("available"):
+        try:
+            ratio_date = min(mts["record_date"], interest["record_date"])
+            aligned_mts = mts if mts["record_date"] == ratio_date else fetch_treasury_mts_ytd_value(ratio_date)
+            aligned_interest = (interest if interest["record_date"] == ratio_date
+                                else fetch_treasury_interest_expense_value(ratio_date))
+            receipts_ytd = safe_float(aligned_mts.get("receipts_ytd_usd"))
+            interest_ytd = safe_float(aligned_interest.get("interest_fytd_usd"))
+            if (not aligned_mts.get("available") or not aligned_interest.get("available")
+                    or aligned_mts.get("record_date") != ratio_date
+                    or aligned_interest.get("record_date") != ratio_date
+                    or not receipts_ytd or interest_ytd is None):
+                raise ValueError("matched_fiscal_period_unavailable")
+            fiscal.update({
+                "interest_revenue_ratio_pct": interest_ytd / receipts_ytd * 100.0,
+                "interest_revenue_ratio_source": "Treasury Fiscal Data YTD",
+                "interest_revenue_ratio_date": ratio_date,
+                "interest_revenue_ratio_fiscal_year": aligned_mts["fiscal_year"],
+                "interest_revenue_ratio_interest_ytd_usd": interest_ytd,
+                "interest_revenue_ratio_receipts_ytd_usd": receipts_ytd,
+            })
+            for aligned, original in ((aligned_mts, mts), (aligned_interest, interest)):
+                if aligned is not original:
+                    for receipt in aligned.get("history") or []:
+                        # Keep the existing evidence source identity. Both the
+                        # latest supplement and matched ratio need their raw rows.
+                        for existing in fiscal["history"]:
+                            if existing["series_id"] == receipt["series_id"]:
+                                existing.update(raw_series_receipt(
+                                    existing["rows"] + receipt["rows"], "record_date",
+                                    receipt["series_id"], receipt["endpoint_url"],
+                                    max(existing["retrieved_at"], receipt["retrieved_at"]),
+                                    receipt["fields"]))
+                                break
+                        else:
+                            fiscal["history"].append(copy.deepcopy(receipt))
+        except Exception as exc:
+            fiscal["missing"]["Treasury YTD Ratio"] = type(exc).__name__
 
     try:
         auction = fetch_treasury_long_auction_value()
@@ -5855,16 +5908,23 @@ def format_fiscal_lines(value, macro_state):
     if not fiscal:
         return ["财政状态: 数据不足（免费官方财政源不可用）"]
     status = macro_state.get("fiscal_status") or fiscal.get("status")
+    ratio_date = fiscal.get("interest_revenue_ratio_date")
+    ratio_note = ""
+    if ratio_date:
+        ratio_note = (f"（YTD截至{ratio_date}）" if fiscal.get("interest_revenue_ratio_source") == "Treasury Fiscal Data YTD"
+                      else f"（{ratio_date}季调年率）")
+    interest_date = (fiscal.get("source_date") or {}).get("treasury_interest")
+    interest_note = f"（截至{interest_date}）" if interest_date else ""
     return [
         (
             f"财政状态: {fiscal_status_cn(status)} | "
             f"赤字/GDP {format_pct_value(fiscal.get('deficit_gdp_pct'), 2)} | "
-            f"利息/收入 {format_pct_value(fiscal.get('interest_revenue_ratio_pct'), 2, signed=False)} | "
+            f"利息/收入 {format_pct_value(fiscal.get('interest_revenue_ratio_pct'), 2, signed=False)}{ratio_note} | "
             f"债务/GDP {format_pct_value(fiscal.get('debt_gdp_pct'), 2, signed=False)} | "
             f"长债拍卖投标倍数 {format_ratio_value(fiscal.get('long_auction_avg_bid_to_cover'))}"
         ),
         (
-            f"财政补充: 利息YTD {format_money_compact_plain(fiscal.get('treasury_interest_fytd_usd'), 2)} | "
+            f"财政补充: 利息YTD {format_money_compact_plain(fiscal.get('treasury_interest_fytd_usd'), 2)}{interest_note} | "
             f"长债发行样本 {format_money_compact_plain(fiscal.get('long_auction_offering_recent_usd'), 2)} | "
             "财政状态仅用于长期配置，不作为短线交易信号。"
         ),
@@ -12524,6 +12584,9 @@ def send_common_push(dry_run=False, cmd=None, check_commands=False,
             record = fetch_macro_record({})
             event_news = news.fetch_events()
             now = time.time()
+            if store:
+                diagnostic = common.record_news_collection(store, report_id, event_news, now)
+                log_line("common_news " + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True))
             # If preparation spans an hour, expire this scheduled attempt instead
             # of publishing a missed snapshot under a current-looking title.
             if report_id.startswith("common:hour:") and report_id != common.report_id(now):

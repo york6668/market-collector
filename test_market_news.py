@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from requests.exceptions import HTTPError, ReadTimeout
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
@@ -119,6 +120,26 @@ class EventSourceTest(unittest.TestCase):
             self.assertEqual(3, len(bot.format_news_lines(bot.dedupe_news_titles(state, actual))))
             self.assertEqual([], bot.dedupe_news_titles(state, actual))
 
+    def test_failure_diagnostics_distinguish_request_http_json_and_envelope(self):
+        cases = [
+            (Mock(side_effect=ReadTimeout("private request details")), "request", "ReadTimeout", None, None),
+            (Mock(return_value=Mock(status_code=503, raise_for_status=Mock(side_effect=HTTPError("body")))),
+             "http", "HTTPError", 503, None),
+            (Mock(return_value=Mock(status_code=200, json=Mock(side_effect=ValueError("not JSON")))),
+             "json", "ValueError", 200, None),
+            (Mock(return_value=Mock(status_code=200, json=lambda: {"code": 40000})),
+             "envelope", "event_news_envelope_invalid", 200, 40000),
+        ]
+        for get, stage, reason, status, source_code in cases:
+            io.clear_cache()
+            with self.subTest(stage=stage), patch.object(io, "get", get):
+                result = news.fetch_events(NOW)
+            self.assertEqual((stage, reason, status, source_code),
+                             tuple(result[k] for k in ("failure_stage", "reason", "http_status", "source_code")))
+            self.assertNotIn("private request details", json.dumps(result))
+            self.assertIn("checked_at", result)
+            self.assertEqual(1, get.call_count)
+
 
 class EventDeliveryTest(unittest.TestCase):
     def setUp(self):
@@ -153,6 +174,22 @@ class EventDeliveryTest(unittest.TestCase):
         self.assertIn('公司4', text)
         self.assertNotIn('公司1', text)
         self.assertIn('来源显示时间', text)
+
+    def test_collection_failure_survives_delivery_cleanup_and_later_recovery(self):
+        self.fetch.return_value = {"status": "unavailable", "events": [], "reason": "ReadTimeout",
+                                   "failure_stage": "request", "checked_at": NOW, "http_status": None}
+        self.assertEqual("sent", bot.send_common_push())
+        original = self.store.load_metadata("common:news_collection")["last_failure"]
+        self.assertEqual("ReadTimeout", original["reason"])
+        self.assertEqual("request", original["failure_stage"])
+        self.assertEqual({}, json.loads(self.store.get_report(common.report_id(NOW))["commit_payload"]))
+        self.now[0] += 3600
+        self.fetch.return_value = events(1)
+        self.assertEqual("sent", bot.send_common_push())
+        saved = self.store.load_metadata("common:news_collection")
+        self.assertEqual("ok", saved["latest"]["status"])
+        self.assertEqual(original, saved["last_failure"])
+        self.assertNotIn("events", saved["latest"])
 
     def test_unknown_survives_restart_and_is_not_selected_by_next_hour(self):
         self.send.side_effect = DeliveryFailure('unknown')

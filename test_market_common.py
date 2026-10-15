@@ -178,7 +178,8 @@ class CommonTest(unittest.TestCase):
         self.store.expire_scheduled('COMMON')
         self.assertEqual('unknown', self.store.get_report(common.report_id(NOW))['summary_status'])
 
-    def test_asset_report_text_is_separate_and_macro_measurements_are_preserved(self):
+    @patch.object(bot.time, 'time', return_value=NOW)
+    def test_asset_report_text_is_separate_and_macro_measurements_are_preserved(self, _clock):
         record = macro_record()
         common_text = bot.build_common_report(record, NOW)
         self.assertIn('公共宏观与事件简报', common_text)

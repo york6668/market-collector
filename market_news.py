@@ -123,19 +123,40 @@ def parse_events(rows, now):
 
 def fetch_events(now=None):
     now = time.time() if now is None else now
+    started = time.time()
+    attempt = {"failure_stage": "request", "http_status": None, "source_code": None}
     def fetch():
         response = io.get(EVENT_URL, params=EVENT_PARAMS, timeout=(3, 8))
+        attempt["failure_stage"] = "http"
+        status = response.status_code
+        attempt["http_status"] = status if isinstance(status, int) else None
         response.raise_for_status()
+        attempt["failure_stage"] = "json"
         data = response.json()
+        attempt["failure_stage"] = "envelope"
+        if isinstance(data, dict) and isinstance(data.get("code"), int):
+            attempt["source_code"] = data["code"]
         if not isinstance(data, dict) or data.get("code") != 20000 or not isinstance(data.get("data"), dict):
             raise ValueError("event_news_envelope_invalid")
+        attempt["failure_stage"] = "items"
         rows = data["data"].get("items")
         if not isinstance(rows, list):
             raise ValueError("event_news_items_invalid")
-        return {"rows": rows, "retrieved_at": time.time()}
+        return {"rows": rows, "retrieved_at": time.time(),
+                "http_status": attempt["http_status"], "source_code": attempt["source_code"]}
     try:
         receipt = io.cached_call(("public_event_news", EVENT_URL, tuple(sorted(EVENT_PARAMS.items())), "zh-CN"), 300, fetch)
-        return {"status": "ok", "events": parse_events(receipt["rows"], now),
-                "source": EVENT_SOURCE, "retrieved_at": receipt["retrieved_at"]}
+        attempt.update(http_status=receipt.get("http_status"), source_code=receipt.get("source_code"))
+        attempt["failure_stage"] = "parse"
+        events = parse_events(receipt["rows"], now)
+        return {"status": "ok", "events": events, "source": EVENT_SOURCE,
+                "retrieved_at": receipt["retrieved_at"], "checked_at": time.time(),
+                "duration_ms": round((time.time() - started) * 1000, 3),
+                "http_status": receipt.get("http_status"), "source_code": receipt.get("source_code")}
     except Exception as exc:
-        return {"status": "unavailable", "events": [], "source": EVENT_SOURCE, "reason": type(exc).__name__}
+        reason = type(exc).__name__
+        if attempt["failure_stage"] in ("envelope", "items") and isinstance(exc, ValueError):
+            reason = str(exc)
+        return {"status": "unavailable", "events": [], "source": EVENT_SOURCE,
+                "reason": reason, "checked_at": time.time(), "attempted_at": started,
+                "duration_ms": round((time.time() - started) * 1000, 3), **attempt}

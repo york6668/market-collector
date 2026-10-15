@@ -71,6 +71,21 @@ def select_events(store, record, now):
     return {**record, "events": selected}
 
 
+def record_news_collection(store, identity, record, now):
+    """Keep bounded diagnostics even after delivery discards its commit payload."""
+    fields = ("status", "source", "reason", "failure_stage", "http_status", "source_code",
+              "retrieved_at", "checked_at", "attempted_at", "duration_ms")
+    latest = {key: record[key] for key in fields if key in record}
+    latest.update(report_id=identity, checked_at=record.get("checked_at", now),
+                  eligible_count=len(record.get("events") or []))
+    saved = store.load_metadata("common:news_collection") or {}
+    saved["latest"] = latest
+    if record.get("status") != "ok":
+        saved["last_failure"] = copy.deepcopy(latest)
+    store.save_metadata("common:news_collection", saved)
+    return latest
+
+
 def apply_receipt(store, identity, commit, receipt):
     if commit.get("kind") != "common_report":
         return

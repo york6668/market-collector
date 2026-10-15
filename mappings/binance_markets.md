@@ -65,12 +65,22 @@ VOO 支撑、阻力、趋势、量价与锚点只用 `EQ_VOO`。SPY 的基差仅
 - HTTP 按 `Retry-After` 或指数退避，任务独立失败。WebSocket 确认订阅、心跳和失联检测，连接恢复后开始新的覆盖区间；不会跨断线补零。状态分正常、积累中、窗口不完整、过期、来源暂缺和不适用。
 - `python3 btc_push.py --collect-history` 只执行一次到期历史任务；`--history-status` 只读进度、失败及跨日验收计数。正常守护进程同时运行增量任务和公开流。14 个自然日、每个股票 10 个交易日和一次新 CFTC 观察日是时长条件，仍须检查真实缺口恢复与源健康；功能测试或单次连接成功不等于稳定性通过。
 
+## 公共宏观与财政口径
+
+- US10Y 首选 Yahoo Finance `^TNX`，缺失或过期时使用 US Treasury `daily_treasury_yield_curve/BC_10YEAR`；真实收益率使用 Treasury `daily_treasury_real_yield_curve/TC_10YEAR`，属于 10 年期 TIPS 实际收益率。DXY 使用 Yahoo `DX-Y.NYB`。利率及利率变化分别为百分比和百分点；美元指数变化为百分比，不做同一单位转换。
+- `WALCL` 为 FRED 周度 Fed 总资产，`M2SL` 为月度 M2；保留原观察日期及实际采集时间。月度序列的月初日期表示观察月份，不是当天发布。FedWatch 仅在已有配置启用时取数，未配置继续明确标注未启用。
+- Treasury Fiscal Data `v1/accounting/od/buybacks_operations` 同时包含预告和结果。[TreasuryDirect 定义](https://www.treasurydirect.gov/help-center/faqs/buyback-faqs/)区分预告最大面值与结果实际接受面值；`max_par_amt_redeemed` 不能代替 `total_par_amt_accepted`。最新完成操作及近期汇总只使用操作日不晚于美国东部当前日期、实际接受金额为有限非负数的结果；零金额是有效结果，空值或字符串 `null` 尚不能证明完成。有效证据历史只收录这些结果，不能把未来预告映成最近已执行回购。
+- Treasury Fiscal Data `v1/accounting/mts/mts_table_1` 的同一观察日包含两个财年分组，`Year-to-Date` 名称会重复。先按观察日计算当前美国财年（10 月进入下一财年），再使用 `FY <年>` 父项的 `classification_id` 与子项 `parent_id` 选择唯一 YTD；`line_code_nbr` 只标识展示行，不能证明财年。缺失或多义时保留不可用，不回退到上一财年。依据为官方 [Monthly Treasury Statement](https://fiscal.treasury.gov/accounting/monthly-treasury-statement) 的 Table 1 及实际 API 父子关系。
+- “利息/收入”采用 `v2/accounting/od/interest_expense` 的各分项总利息 FYTD 除以 MTS 当前财年财政收入 YTD，属于国债总利息口径，不能等同预算净利息占比。两源发布进度不同时，按较早截止日重新取得另一源同月数据，保存比率的财年、截止日和实际分子/分母及来源历史；最新利息补充数据另保留其日期。无法配对时不混算，保留已有且同季度的 FRED 年率比率并标注口径和缺口；FRED 两季度不一致时也不计算。
+- 宏观缓存的计算版本参与共享身份；财政或回购计算修正后使旧版本失效，不将旧数值重新标成新采集。原已发送公共简报及其查询保持原文，下一份使用新结果。
+
 ## 公共事件与新闻归属
 
 - 来源为 [华尔街见闻快讯](https://wallstreetcn.com/live) 的公开页面接口 `https://api-one-wscn.awtmt.com/apiv1/content/lives`；参数 `channel=us-stock-channel,client=pc,limit=100`。2026-09-30 实测包络 `code=20000`、`data.items` 为列表。不是推荐文章接口，未发现稳定版本承诺；失败只降级事件模块，不改用其他来源。
 - 只接受 `type=live,is_priced=false` 且属于 `us-stock-channel` 的条目；`id` 对应 `https://wallstreetcn.com/livenews/<id>` 原文。`title` 是原生中文标题，缺失时用 `content_text` 首段；不生成解读。`display_time` 是**来源显示时间（Unix 秒）**，不是抓取时间或已证明的事件发生时间；只接受最近 24h、非未来、有限数值，缺失时舍弃。
 - 选择政策、经济数据、财报、监管和突发事件，不要求 QQQ、VOO 或指数名称。检查标题及正文推广导流，排除荐股、收益宣传、付费、日历/综合摘要和纯行情涨跌。标题含“广告收入”“付费用户”不等于推广。仅加密主题归 BTC，不在公共事件模块重复展示。
 - 原始响应使用 5 分钟进程缓存，键包含来源、接口、频道、参数和语言；每次使用仍按源时间检查 24h 时效。公共事件最多 3 条，原文链接去掉营销参数。采集失败显示“事件新闻暂不可用”，正常采集但没有新增合格事件显示“无新增事件”。
+- 每次正式采集的状态、检查时间、HTTP 状态、来源包络代码、失败阶段和错误类别保存到 outbox 的 `common:news_collection`，仅保留最近一次检查及最近一次失败，并写入已有运行日志。成功不会清掉上次失败；报告投递后的 commit 清理也不删除诊断。诊断不保存响应正文或异常原文，不改变发送、去重及 UNKNOWN 恢复语义。历史未留存的失败原因保持未知，当前重试成功不能证明历史根因已解决。
 - 公共去重为 48h，身份同时使用源 id 与规范化标题。只记录实际展示的事件；事件与正文在同一 outbox 入队事务中固化。`common:news_seen` 保存已确认发送记录，尚未应用的 outbox 保存待发送、发送中和 unknown 的预留身份。重试不重新取新闻；unknown 不自动释放。确认未送达且报告过期才可重新选择；晚到回执合并去重记录，不覆盖较新的公共简报。
 - BTC 沿用 BlockBeats 中文快讯、原条数和 48h 去重；只保留明确加密主题，美元、利率、ETF、交易所、合约等泛词不能单独认定为加密新闻，不用无关消息补齐。QQQ、VOO 正文和附件完整文字只引用公共简报；休市查询按原时间/行情重渲染缓存，去掉旧推荐文章，不改原状态或历史已发送附件。
 

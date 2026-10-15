@@ -330,5 +330,115 @@ class CollectionAdapterTest(unittest.TestCase):
         self.assertEqual("local_configuration", value["access_scope"])
 
 
+class TreasuryMacroTest(unittest.TestCase):
+    @staticmethod
+    def mts_rows(year, record_date, receipts=100):
+        rows = []
+        for offset, fy in enumerate((year - 1, year)):
+            parent = f"fy-{fy}"
+            rows.extend([
+                {"classification_id": parent, "classification_desc": f"FY {fy}"},
+                {"classification_desc": "Year-to-Date", "parent_id": parent,
+                 "line_code_nbr": "140" if offset == 0 else "280", "record_date": record_date,
+                 "current_month_gross_rcpt_amt": str(50 if offset == 0 else receipts),
+                 "current_month_gross_outly_amt": "150", "current_month_dfct_sur_amt": "50"},
+            ])
+        return rows
+
+    def test_mts_uses_parent_fiscal_year_including_october_rollover(self):
+        for date, year in (("2026-08-31", 2026), ("2026-10-31", 2027)):
+            rows = self.mts_rows(year, date)
+            with patch.object(bot, "fiscaldata_latest_record_date", return_value=date), \
+                 patch.object(bot, "fiscaldata_get_json", return_value={"data": list(reversed(rows))}):
+                value = bot.fetch_treasury_mts_ytd_value()
+            self.assertTrue(value["available"])
+            self.assertEqual(year, value["fiscal_year"])
+            self.assertEqual(100, value["receipts_ytd_usd"])
+
+    def test_mts_missing_current_year_never_falls_back_to_prior_ytd(self):
+        rows = self.mts_rows(2026, "2026-08-31")[:2]
+        with patch.object(bot, "fiscaldata_get_json", return_value={"data": rows}):
+            self.assertFalse(bot.fetch_treasury_mts_ytd_value("2026-08-31")["available"])
+
+    def fiscal_source(self, path, params):
+        if path.endswith("mts_table_1"):
+            return {"data": self.mts_rows(2026, "2026-08-31")}
+        date = params["filter"].split(":")[-1]
+        amount = 20 if date == "2026-08-31" else 30
+        return {"data": [{"record_date": date, "month_expense_amt": "5", "fytd_expense_amt": str(amount)}]}
+
+    def fiscal_value(self, fetch):
+        fred = {"values": {"interest_revenue_ratio_pct": 35}, "source_date": {}, "missing": {}}
+        with patch.object(bot, "fetch_fred_fiscal_series_value", return_value=fred), \
+             patch.object(bot, "fiscaldata_latest_record_date", side_effect=lambda path, _: "2026-08-31" if path.endswith("mts_table_1") else "2026-09-30"), \
+             patch.object(bot, "fiscaldata_get_json", side_effect=fetch), \
+             patch.object(bot, "fetch_treasury_long_auction_value", return_value={}):
+            return bot.fetch_fiscal_proxy_value()
+
+    def test_ytd_ratio_aligns_months_and_retains_latest_interest_separately(self):
+        value = self.fiscal_value(self.fiscal_source)
+        self.assertEqual(20, value["interest_revenue_ratio_pct"])
+        self.assertEqual("2026-08-31", value["interest_revenue_ratio_date"])
+        self.assertEqual(2026, value["interest_revenue_ratio_fiscal_year"])
+        self.assertEqual((20, 100), (value["interest_revenue_ratio_interest_ytd_usd"],
+                                    value["interest_revenue_ratio_receipts_ytd_usd"]))
+        self.assertEqual(30, value["treasury_interest_fytd_usd"])
+        interest = [x for x in value["history"] if x["series_id"] == "treasury_interest"]
+        self.assertEqual(1, len(interest))
+        self.assertEqual({"2026-08-31", "2026-09-30"}, set(interest[0]["sample_dates"]))
+        record = bot.make_data_record({"fiscal_proxy": value, "history": value["history"]}, "macro")
+        bundle = evidence.build_bundle({"public_records": {"macro": record}}, "text", "test",
+                                       datetime.now(timezone.utc).isoformat())
+        reasons = evidence.validate_bundle(bundle, "text")["dataset_reasons"].get("macro", [])
+        self.assertNotIn("source_contract_mismatch", reasons)
+        text = "\n".join(bot.format_fiscal_lines({"fiscal_proxy": value}, {}))
+        self.assertIn("YTD截至2026-08-31", text)
+        self.assertIn("截至2026-09-30", text)
+
+    def test_missing_matched_month_preserves_fred_ratio_instead_of_mixing_dates(self):
+        def fetch(path, params):
+            if path.endswith("interest_expense") and params["filter"].endswith("2026-08-31"):
+                return {"data": []}
+            return self.fiscal_source(path, params)
+        value = self.fiscal_value(fetch)
+        self.assertEqual(35, value["interest_revenue_ratio_pct"])
+        self.assertIn("Treasury YTD Ratio", value["missing"])
+
+    def test_fred_ratio_requires_same_quarter(self):
+        def fetch(series_id):
+            return [{"date": "2026-01-01" if series_id == "W006RC1Q027SBEA" else "2026-04-01", "value": 100}]
+        with patch.object(bot, "fetch_fred_series", side_effect=fetch):
+            value = bot.fetch_fred_fiscal_series_value()
+        self.assertNotIn("interest_revenue_ratio_pct", value["values"])
+        self.assertEqual("fred_period_mismatch", value["missing"]["利息/收入"])
+
+    def test_buybacks_skip_announcements_future_and_invalid_amounts(self):
+        def operation(date, accepted):
+            return {"operation_date": date, "total_par_amt_accepted": accepted,
+                    "max_par_amt_redeemed": "6000000000"}
+        rows = [operation("2026-10-15", "6000000000"), operation("2026-10-14", "null"),
+                operation("2026-10-13", "nan"), operation("2026-10-12", "-1"),
+                operation("2026-10-08", "6000000000"), operation("2026-10-06", "0")]
+        with patch.object(bot, "datetime", wraps=datetime) as clock, \
+             patch.object(bot, "fiscaldata_get_json", return_value={"data": rows}):
+            clock.now.return_value = datetime(2026, 10, 14, tzinfo=timezone.utc)
+            value = bot.fetch_treasury_buyback_value()
+        self.assertEqual("2026-10-08", value["operation_date"])
+        self.assertEqual(6_000_000_000, value["total_par_amt_accepted"])
+        self.assertEqual("strong", value["scale_status"])
+        self.assertEqual(6, value["days_since_latest"])
+        self.assertEqual(2, value["recent_count"])
+        self.assertEqual(6_000_000_000, value["recent_total_accepted"])
+        self.assertEqual(["2026-10-08", "2026-10-06"],
+                         [r["operation_date"] for r in value["history"][0]["rows"]])
+
+    def test_buyback_announcement_alone_cannot_confirm_execution(self):
+        with patch.object(bot, "fiscaldata_get_json", return_value={"data": [
+                {"operation_date": "2026-10-15", "total_par_amt_accepted": "null"}]}):
+            value = bot.fetch_treasury_buyback_value()
+        self.assertFalse(value["available"])
+        self.assertEqual("no_completed_buyback_results", value["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
