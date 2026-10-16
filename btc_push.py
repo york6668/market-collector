@@ -4188,6 +4188,30 @@ def _fetch_etf_holdings(state):
     return record
 
 
+def _fetch_etf_flow(venue, endpoint, parser, params=None):
+    flow = {"venue": venue, "endpoint_url": endpoint,
+            "retrieved_at": time.time(), "status": "unavailable", "value": {}}
+    try:
+        parsed = parser(public_get_text(endpoint, params=params))
+        retrieved_at = time.time()
+        stale, expected = btc_etf_flow.freshness(parsed["source_date"], retrieved_at,
+            ETF_SOURCE_READY_ET_HOUR, ETF_SOURCE_STALE_GRACE_DAYS)
+        if stale in ("future_flow_date", "flow_session_not_closed", "flow_calendar_year_unverified", "flow_non_trading_date"):
+            raise ValueError(stale)
+        flow.update(retrieved_at=retrieved_at, source_date=parsed["source_date"],
+                    expected_source_date=expected, source_stale=bool(stale),
+                    source_stale_reason=stale, flow_scope=parsed["flow_scope"],
+                    window_quality=parsed["window_quality"], history=parsed["history"],
+                    value=copy.deepcopy(parsed["values"]))
+        complete = all(v is not None for v in parsed["values"].values())
+        flow.update(status="unavailable" if stale else "ok" if complete else "partial",
+                    reason=stale or (None if complete else "incomplete_flow_windows"))
+    except (requests.RequestException, ValueError) as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        flow["reason"] = f"http_{code}" if code is not None else str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    return flow
+
+
 def fetch_etf_record(state):
     record = _fetch_etf_holdings(state)
     holding_valid = record_is_current(record)
@@ -4198,32 +4222,23 @@ def fetch_etf_record(state):
     if not holding_valid:
         for key in ("holdings_btc", "holding_7d_pct", "holding_7d_status"):
             value[key] = None
-    retrieved_at = time.time()
-    flow = {"venue": btc_etf_flow.VENUE, "endpoint_url": btc_etf_flow.ENDPOINT,
-            "retrieved_at": retrieved_at, "status": "unavailable", "value": {}}
-    try:
-        parsed = btc_etf_flow.parse_json(public_get_text(btc_etf_flow.ENDPOINT))
-        retrieved_at = time.time()
-        stale, expected = btc_etf_flow.freshness(parsed["source_date"], retrieved_at,
-            ETF_SOURCE_READY_ET_HOUR, ETF_SOURCE_STALE_GRACE_DAYS)
-        if stale in ("future_flow_date", "flow_session_not_closed", "flow_calendar_year_unverified", "flow_non_trading_date"):
-            raise ValueError(stale)
-        flow.update(retrieved_at=retrieved_at, source_date=parsed["source_date"],
-                    expected_source_date=expected, source_stale=bool(stale),
-                    source_stale_reason=stale, flow_scope=parsed["flow_scope"],
-                    window_quality=parsed["window_quality"],
-                    value=copy.deepcopy(parsed["values"]))
-        if stale:
-            flow["reason"] = stale
-        else:
-            flow.update(status="ok" if all(v is not None for v in parsed["values"].values()) else "partial",
-                        reason=None if all(v is not None for v in parsed["values"].values()) else "incomplete_flow_windows")
-            value.update(parsed["values"])
-        value["history"] = parsed["history"]
-        value["source_date"].update({f"flow_{days}d": parsed["source_date"] for days in btc_etf_flow.WINDOWS})
-    except (requests.RequestException, ValueError) as exc:
-        code = getattr(getattr(exc, "response", None), "status_code", None)
-        flow["reason"] = f"http_{code}" if code is not None else str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    candidates = [
+        _fetch_etf_flow(btc_etf_flow.COINBOSS_VENUE, btc_etf_flow.COINBOSS_ENDPOINT,
+                        btc_etf_flow.parse_coinboss_json, {"asset": "BTC", "days": 30}),
+        _fetch_etf_flow(btc_etf_flow.VENUE, btc_etf_flow.ENDPOINT, btc_etf_flow.parse_json),
+    ]
+    # Select one source history, never splice sources or skip a newer
+    # partial day. On equal dates prefer the anonymous per-fund CoinBoss API.
+    dated = [item for item in candidates if item.get("source_date")]
+    flow = max(dated, key=lambda item: item["source_date"]) if dated else candidates[-1]
+    record["flow_sources"] = [{k: copy.deepcopy(item.get(k)) for k in (
+        "venue", "endpoint_url", "status", "reason", "source_date", "retrieved_at")}
+        for item in candidates]
+    if flow.get("source_date"):
+        if not flow.get("source_stale"):
+            value.update(flow["value"])
+        value["history"] = flow.pop("history")
+        value["source_date"].update({f"flow_{days}d": flow["source_date"] for days in btc_etf_flow.WINDOWS})
     flow_valid = any(value.get(f"flow_{days}d_usd") is not None for days in btc_etf_flow.WINDOWS)
     record.update(value=value, flow_record=flow, flow_status=flow["status"], flow_reason=flow.get("reason"),
                   source_date=value["source_date"], updated_at=time.time(),
@@ -7519,6 +7534,7 @@ def build_etf_rule_state(payload, state):
     previous_source = previous_record.get("flow_record") or {}
     if btc_etf_flow.is_flow_source(current_source) and (
             not btc_etf_flow.is_flow_source(previous_source)
+            or current_source.get("venue") != previous_source.get("venue")
             or current_source.get("source_date") != previous_source.get("source_date")):
         previous_flow_5d = None  # Different publishers/daily rolling windows are not comparable revisions.
     if current_flow_5d is not None and previous_flow_5d is not None:
@@ -9192,13 +9208,15 @@ def format_etf_holdings_only(etf):
         amounts = [f"{days}D {format_signed_money_change(amount) if amount is not None else '数据不足'}"
                    for days, amount in zip(btc_etf_flow.WINDOWS, current_flows)]
         lines = ["BTC现货ETF：" + " | ".join(amounts)
-                 + f"（TFTC，截至 {flow.get('source_date') or '未知日期'}）"]
+                 + f"（{flow.get('venue') or '未知来源'}，截至 {flow.get('source_date') or '未知日期'}）"]
         if flow.get("source_date") and (flow.get("expected_source_date") or "") > flow["source_date"]:
             lines.append(f"ETF流量待更新：应更新至 {flow['expected_source_date']}，当前仍截至 {flow['source_date']}")
     else:
         lines = ["BTC现货ETF：美元净流量缺失（1D/5D/30D）"]
     if any(amount is not None for amount in current_flows):
-        lines.append("ETF流量来源：TFTC " + btc_etf_flow.PAGE)
+        page = btc_etf_flow.source_page(flow.get("venue"))
+        if page:
+            lines.append(f"ETF流量来源：{flow['venue']} " + page)
     background = etf.get("flow_background") or {}
     if flow.get("source_stale") and flow.get("value"):
         background = {"venue": flow.get("venue"), "value": flow["value"], "source_date": {
@@ -9214,8 +9232,9 @@ def format_etf_holdings_only(etf):
                 historical.append(f"{days}D {format_signed_money_change(amount)}（{day}）")
         if historical and not any(amount is not None for amount in current_flows):
             lines.append("ETF流量历史：" + " | ".join(historical) + "，仅作背景")
-            if background.get("venue") == btc_etf_flow.VENUE:
-                lines.append("ETF流量来源：TFTC " + btc_etf_flow.PAGE)
+            page = btc_etf_flow.source_page(background.get("venue"))
+            if page:
+                lines.append(f"ETF流量来源：{background['venue']} " + page)
     amount = safe_float(record_value(etf, "holdings_btc"))
     holding = etf.get("holdings_record") or {}
     if amount is None and holding.get("source_stale"):

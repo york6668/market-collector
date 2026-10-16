@@ -1,5 +1,8 @@
 """Bounded public collection, reusable per-thread HTTP sessions and timings."""
 import copy
+import socket
+import struct
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,6 +11,8 @@ from contextvars import copy_context
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.exceptions import ReadTimeoutError
 
 _local = threading.local()
@@ -17,9 +22,114 @@ _fetch_locks = [threading.RLock() for _ in range(32)]
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="btc-public")
 
 
+def _socket_addresses(sock):
+    try:
+        return {"peer_ip": sock.getpeername()[0], "local_ip": sock.getsockname()[0]}
+    except OSError:
+        return {}  # Diagnostics must not turn a concurrently closed socket into a new failure.
+
+
+def _tcp_state(sock):
+    # Darwin's public TCP_CONNECTION_INFO, as defined by netinet/tcp.h.
+    # Observe only this client's socket; no packet capture or elevated access.
+    if sys.platform != "darwin" or sock is None:
+        return None
+    try:
+        data = sock.getsockopt(socket.IPPROTO_TCP, 0x106, 112)
+        if len(data) < 104:
+            return None
+        return {"state": data[0], "send_buffer_bytes": struct.unpack_from("I", data, 32)[0],
+                "rtt_ms": struct.unpack_from("I", data, 44)[0],
+                **dict(zip(("tx_packets", "tx_bytes", "tx_retransmitted_bytes", "rx_packets",
+                            "rx_bytes", "rx_out_of_order_bytes"), struct.unpack_from("6Q", data, 56)))}
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+class _ObservedHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        event = getattr(self, "_collection_event", None)
+        started = time.perf_counter()
+        if event is not None:
+            event["phase"] = "dns_tcp_connect"
+        try:
+            sock = super()._new_conn()
+            if event is not None:
+                event.update(_socket_addresses(sock), connection_mode="new", phase="tls_handshake")
+            return sock
+        finally:
+            if event is not None:
+                event["dns_tcp_ms"] = round((time.perf_counter() - started) * 1000, 3)
+
+    def connect(self):
+        event = getattr(self, "_collection_event", None)
+        started = time.perf_counter()
+        try:
+            result = super().connect()
+            if event is not None:
+                event.update(phase="request_send", tls_version=self.sock.version())
+            return result
+        finally:
+            if event is not None:
+                event["connect_ms"] = round((time.perf_counter() - started) * 1000, 3)
+
+    def request(self, *args, **kwargs):
+        event = getattr(self, "_collection_event", None)
+        if event is not None:
+            event["phase"] = "request_send"
+        result = super().request(*args, **kwargs)
+        if event is not None:
+            event["phase"] = "response_headers"
+        return result
+
+    def getresponse(self):
+        before = _tcp_state(self.sock)
+        try:
+            result = super().getresponse()
+        except Exception:
+            event = getattr(self, "_collection_event", None)
+            if event is not None:
+                event.update(tcp_before_response=before, tcp_at_failure=_tcp_state(self.sock))
+            raise
+        self._last_headers_at = time.monotonic()
+        event = getattr(self, "_collection_event", None)
+        if event is not None:
+            event["phase"] = "response_body"
+        return result
+
+
+class _ObservedHTTPSPool(HTTPSConnectionPool):
+    ConnectionCls = _ObservedHTTPSConnection
+
+    def _get_conn(self, timeout=None):
+        conn = super()._get_conn(timeout)
+        events = getattr(_local, "active_transport", None)
+        if events is not None:
+            last = getattr(conn, "_last_headers_at", None)
+            event = {"connection_mode": "reused" if conn.sock is not None else "new",
+                     "phase": "connection_checkout",
+                     "idle_since_headers_sec": round(time.monotonic() - last, 3) if last is not None else None}
+            if conn.sock is not None:
+                event.update(_socket_addresses(conn.sock))
+            events.append(event)
+            conn._collection_event = event
+        else:
+            conn._collection_event = None
+        return conn
+
+
+class _ObservedAdapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        super().init_poolmanager(*args, **kwargs)
+        # PoolManager defaults reference a module-wide dictionary. Keep other
+        # requests clients untouched, including Telegram and private providers.
+        self.poolmanager.pool_classes_by_scheme = dict(self.poolmanager.pool_classes_by_scheme,
+                                                       https=_ObservedHTTPSPool)
+
+
 def _new_session():
     value = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8)
+    adapter = _ObservedAdapter(pool_connections=8, pool_maxsize=8)
     value.mount("https://", adapter)
     return value
 
@@ -42,6 +152,9 @@ def _request_once(client, method, url, attempt, **kwargs):
     timer = time.perf_counter()
     status, failure = None, None
     phase, headers_ms, response_headers = "response_headers", None, {}
+    previous_transport = getattr(_local, "active_transport", None)
+    transport = []
+    _local.active_transport = transport
     hooks = dict(kwargs.pop("hooks", None) or {})
     callbacks = hooks.get("response") or []
     if callable(callbacks):
@@ -60,6 +173,8 @@ def _request_once(client, method, url, attempt, **kwargs):
         response = client.request(method, url, hooks=hooks, **kwargs)
         status = response.status_code
         phase = "complete"
+        for event in transport:
+            event["phase"] = "complete"
         if status >= 400:
             failure = "http_" + str(status)
         return response
@@ -67,6 +182,7 @@ def _request_once(client, method, url, attempt, **kwargs):
         failure = type(exc).__name__
         raise
     finally:
+        _local.active_transport = previous_transport
         trace = getattr(_local, "trace", None)
         if trace is not None:
             parsed = urlsplit(url)
@@ -77,10 +193,13 @@ def _request_once(client, method, url, attempt, **kwargs):
                 "started_at": started, "retrieved_at": time.time(),
                 "duration_ms": round((time.perf_counter() - timer) * 1000, 3),
                 "http_status": status, "failure": failure,
-                "attempt": attempt, "connection_mode": "fresh" if attempt > 1 else "pooled",
+                "attempt": attempt, "session_mode": "fresh" if attempt > 1 else "pooled",
+                "connection_mode": transport[-1]["connection_mode"] if transport else "unobserved",
                 "response_headers_ms": headers_ms,
-                "failure_phase": phase if failure and phase != "complete" else None,
+                "failure_phase": ((transport[-1]["phase"] if transport else phase)
+                                  if failure and phase != "complete" else None),
                 "response_headers": response_headers,
+                "transport": transport,
             })
 
 

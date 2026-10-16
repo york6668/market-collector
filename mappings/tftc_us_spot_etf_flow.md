@@ -2,6 +2,8 @@
 
 匿名 GET [公开 JSON](https://www.tftc.io/bitcoin-etf-flows/data.json)，[发布方说明](https://www.tftc.io/bitcoin-etf-flows)明确单位 USD、12 只美国现货基金范围及净申购减赎回口径。日汇总与近期逐基金流量来自 SoSoValue；早期逐基金历史来自 Farside 汇总的发行方披露。数据由 TFTC 发布，来源不能标成直接访问 SoSoValue 或 Farside。按 CC BY 4.0 在报告中注明 TFTC 来源。
 
+采集同时核对 [CoinBoss 匿名明细](coinboss_us_spot_etf_flow.md)，选择截至日期较新的来源历史，同日优先 CoinBoss；完整性决定各窗口是否可用，不跳过新日或拼接两者窗口。TFTC 的原始 USD 精度及以下校验保持独立。
+
 ## 字段和完整性
 
 | JSON 字段 | 使用方式 |

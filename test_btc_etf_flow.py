@@ -10,7 +10,7 @@ import btc_etf_flow as flow
 import btc_push as bot
 import btc_evidence
 from test_btc_etf import page
-from collector_replay_fixture import END_MS, flow_response
+from collector_replay_fixture import END_MS, flow_response, coinboss_response
 
 NOW = END_MS / 1000 + 10
 
@@ -19,12 +19,15 @@ class FlowTests(unittest.TestCase):
     def parse(self, data=None):
         return flow.parse_json(json.dumps(flow_response() if data is None else data))
 
-    def fetch(self, data=None, html=None, failed=None):
+    def fetch(self, data=None, html=None, failed=None, coinboss=None):
         def get(url, **kwargs):
             if url == failed:
                 raise requests.Timeout()
             if url == btc_etf.ENDPOINT:
                 return page() if html is None else html
+            if url == flow.COINBOSS_ENDPOINT:
+                self.assertEqual({"asset": "BTC", "days": 30}, kwargs["params"])
+                return json.dumps(coinboss if coinboss is not None else {})
             self.assertEqual(flow.ENDPOINT, url)
             return json.dumps(flow_response() if data is None else data)
         with patch.object(bot, "public_get_text", side_effect=get), patch.object(bot.time, "time", return_value=NOW):
@@ -151,6 +154,68 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(bot.build_etf_rule_state(payload, state)["consistency"]["flow_5d_inconsistent"])
         previous["flow_record"]["venue"] = "SoSoValue"
         self.assertFalse(bot.build_etf_rule_state(payload, state)["consistency"]["flow_5d_inconsistent"])
+
+    def test_coinboss_usd_millions_conversion_and_published_rounding(self):
+        for amount in (0, -1.2):
+            parsed = flow.parse_coinboss_json(json.dumps(coinboss_response(amount=amount)))
+            self.assertEqual(amount * 1000000, parsed["values"]["flow_1d_usd"])
+        data = coinboss_response()
+        data["data"][data["dates"][-1]]["TOTAL"] = 1.3
+        parsed = flow.parse_coinboss_json(json.dumps(data))
+        self.assertEqual(1300000, parsed["values"]["flow_1d_usd"])
+        self.assertEqual(36100000, parsed["values"]["flow_30d_usd"])
+        self.assertEqual(1200000, parsed["history"][-1]["perEtfUsd"]["IBIT"])
+        data["data"][data["dates"][-1]]["TOTAL"] = 3
+        self.assertTrue(all(v is None for v in flow.parse_coinboss_json(json.dumps(data))["values"].values()))
+        # The more precise TFTC contract remains strict.
+        tftc = flow_response(); tftc["days"][-1]["netFlowUsd"] += 0.1
+        self.assertIsNone(self.parse(tftc)["values"]["flow_1d_usd"])
+
+    def test_coinboss_source_choice_fallback_and_no_cross_source_windows(self):
+        result = self.fetch(coinboss=coinboss_response())
+        self.assertEqual("CoinBoss", result["flow_record"]["venue"])
+        self.assertEqual(36000000, bot.current_record_value(result, "flow_30d_usd"))
+        self.assertEqual(2, len(result["flow_sources"]))
+        self.assertIn(flow.COINBOSS_PAGE, "\n".join(bot.format_etf_holdings_only(result)))
+        no_holding = self.fetch(coinboss=coinboss_response(), failed=btc_etf.ENDPOINT)
+        self.assertIsNone(bot.current_record_value(no_holding, "holdings_btc"))
+        self.assertEqual(36000000, bot.current_record_value(no_holding, "flow_30d_usd"))
+        fallback = self.fetch(coinboss={"success": False})
+        self.assertEqual("TFTC", fallback["flow_record"]["venue"])
+        self.assertEqual("invalid_coinboss_response", fallback["flow_sources"][0]["reason"])
+        newer_tftc = self.fetch(coinboss=coinboss_response(end="2026-09-02"))
+        self.assertEqual("TFTC", newer_tftc["flow_record"]["venue"])
+        previous = self.fetch(flow_response(amount=99000000))
+        state = {"public_snapshots": [{"ts": NOW - 3600, "public": {"etf": previous}}]}
+        payload = {"public_records": {"etf": result}, "public_snapshot": {"ts": NOW, "public": {"etf": result}}}
+        self.assertFalse(bot.build_etf_rule_state(payload, state)["consistency"]["flow_5d_inconsistent"])
+
+    def test_coinboss_latest_partial_is_not_zero_or_skipped_for_old_complete_source(self):
+        data = coinboss_response()
+        data["data"][data["dates"][-1]]["IBIT"] = None
+        result = self.fetch(flow_response(end="2026-09-02"), coinboss=data)
+        self.assertEqual("CoinBoss", result["flow_record"]["venue"])
+        self.assertEqual("2026-09-03", result["flow_record"]["source_date"])
+        self.assertTrue(all(bot.current_record_value(result, f"flow_{n}d_usd") is None for n in flow.WINDOWS))
+        self.assertIsNotNone(bot.current_record_value(result, "holdings_btc"))
+        data = coinboss_response(); data["dates"].pop(0); data["data"].pop(min(data["data"]))
+        parsed = flow.parse_coinboss_json(json.dumps(data))
+        self.assertEqual(1200000, parsed["values"]["flow_1d_usd"])
+        self.assertIsNone(parsed["values"]["flow_30d_usd"])
+
+    def test_coinboss_schema_fund_scope_and_date_contract(self):
+        for change in (lambda d: d.update(unit="USD"), lambda d: d.update(asset="ETH"),
+                       lambda d: d.update(success=1), lambda d: d["dates"].reverse(),
+                       lambda d: d["dates"].append(d["dates"][-1]),
+                       lambda d: d["tickers"].append({"ticker": "DEFI"})):
+            data = coinboss_response(); change(data)
+            with self.assertRaises(ValueError): flow.parse_coinboss_json(json.dumps(data))
+        for change in (lambda row: row.pop("MSBT"), lambda row: row.update(DEFI=0),
+                       lambda row: row.update(IBIT=True), lambda row: row.update(TOTAL=None),
+                       lambda row: row.update(IBIT="0")):
+            data = coinboss_response(); change(data["data"][data["dates"][-1]])
+            parsed = flow.parse_coinboss_json(json.dumps(data))
+            self.assertTrue(all(v is None for v in parsed["values"].values()))
 
 
 if __name__ == "__main__":

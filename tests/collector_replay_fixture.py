@@ -48,16 +48,31 @@ def flow_response(end="2026-09-03", count=30, amount=1.01234567):
         for day in btc_etf_flow.trading_dates(end, count)]}
 
 
-def anonymous_etf_record():
+def coinboss_response(end="2026-09-03", count=30, amount=1.2):
+    """Construct the anonymous API's million-USD per-fund shape in memory."""
+    import btc_etf_flow
+    import btc_etf
+    dates = btc_etf_flow.trading_dates(end, count)
+    return {"success": True, "asset": "BTC", "unit": "million_usd", "days": count,
+            "tickers": [{"ticker": symbol} for symbol in [*btc_etf.FUNDS, "TOTAL"]],
+            "dates": dates, "data": {day: {**{
+                symbol: amount if symbol == "IBIT" else 0 for symbol in btc_etf.FUNDS},
+                "TOTAL": amount} for day in dates}}
+
+
+def anonymous_etf_record(venue="TFTC"):
     import btc_etf_flow
     record = holdings_only_record()
-    parsed = btc_etf_flow.parse_json(json.dumps(flow_response()))
+    coinboss = venue == btc_etf_flow.COINBOSS_VENUE
+    parsed = (btc_etf_flow.parse_coinboss_json(json.dumps(coinboss_response())) if coinboss
+              else btc_etf_flow.parse_json(json.dumps(flow_response())))
     record["status"] = "ok"
     record["reason"] = None
     record["value"].update(parsed["values"], history=parsed["history"])
     record["value"]["source_date"].update({f"flow_{n}d": parsed["source_date"] for n in (1, 5, 30)})
-    record["flow_record"] = {"status": "ok", "venue": btc_etf_flow.VENUE,
-        "endpoint_url": btc_etf_flow.ENDPOINT, "source_date": parsed["source_date"],
+    record["flow_record"] = {"status": "ok", "venue": venue,
+        "endpoint_url": btc_etf_flow.COINBOSS_ENDPOINT if coinboss else btc_etf_flow.ENDPOINT,
+        "source_date": parsed["source_date"],
         "retrieved_at": record["retrieved_at"], "flow_scope": parsed["flow_scope"]}
     return record
 

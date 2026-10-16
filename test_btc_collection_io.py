@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import requests
+from urllib3 import poolmanager
 from urllib3.exceptions import ReadTimeoutError
 import btc_collection_io as io
 from btc_presentation import render_report, utf16_length
@@ -47,6 +48,56 @@ class CollectionIOTest(unittest.TestCase):
         self.assertEqual(9, len(out))
         self.assertEqual("ZeroDivisionError", out["bad"]["collector_metrics"]["failure"])
 
+    def test_transport_observation_does_not_confuse_session_with_socket_reuse(self):
+        pool = io._ObservedHTTPSPool("example.test")
+        connection = io._ObservedHTTPSConnection("example.test")
+        previous = getattr(io._local, "active_transport", None)
+        try:
+            io._local.active_transport = []
+            with patch.object(io.HTTPSConnectionPool, "_get_conn", return_value=connection):
+                pool._get_conn()
+            self.assertEqual("new", connection._collection_event["connection_mode"])
+            sock = Mock()
+            sock.getpeername.return_value = ("192.0.2.10", 443)
+            sock.getsockname.return_value = ("192.0.2.20", 1234)
+            sock.getsockopt.side_effect = OSError("optional TCP state unavailable")
+            connection.sock = sock
+            connection._last_headers_at = time.monotonic() - 3600
+            with patch.object(io.HTTPSConnectionPool, "_get_conn", return_value=connection):
+                pool._get_conn()
+            self.assertEqual("reused", connection._collection_event["connection_mode"])
+            self.assertGreater(connection._collection_event["idle_since_headers_sec"], 3599)
+            with patch.object(io.HTTPSConnection, "request", return_value=None):
+                connection.request("GET", "/")
+            with patch.object(io.HTTPSConnection, "getresponse", side_effect=requests.ReadTimeout()):
+                with self.assertRaises(requests.ReadTimeout): connection.getresponse()
+            self.assertEqual("response_headers", connection._collection_event["phase"])
+            sock.getpeername.side_effect = OSError("socket closed after checkout")
+            with patch.object(io.HTTPSConnectionPool, "_get_conn", return_value=connection):
+                self.assertIs(connection, pool._get_conn())
+        finally:
+            connection.sock = None
+            pool.close()
+            io._local.active_transport = previous
+
+    def test_adapter_observation_is_local_and_tls_failures_keep_the_actual_phase(self):
+        original = poolmanager.pool_classes_by_scheme["https"]
+        client = io._new_session()
+        try:
+            self.assertIs(original, poolmanager.pool_classes_by_scheme["https"])
+            self.assertIs(io._ObservedHTTPSPool, client.get_adapter("https://example.test").poolmanager.pool_classes_by_scheme["https"])
+            conn = io._ObservedHTTPSConnection("example.test")
+            conn._collection_event = {"phase": "connection_checkout"}
+            with patch.object(io.HTTPSConnection, "_new_conn", side_effect=OSError("connect failed")):
+                with self.assertRaises(OSError): conn._new_conn()
+            self.assertEqual("dns_tcp_connect", conn._collection_event["phase"])
+            conn._collection_event["phase"] = "tls_handshake"
+            with patch.object(io.HTTPSConnection, "connect", side_effect=requests.exceptions.SSLError()):
+                with self.assertRaises(requests.exceptions.SSLError): conn.connect()
+            self.assertEqual("tls_handshake", conn._collection_event["phase"])
+        finally:
+            client.close()
+
     def test_read_timeout_recovers_once_with_fresh_connection_and_retains_failure(self):
         for body_timeout in (False, True):
             with self.subTest(body_timeout=body_timeout):
@@ -75,7 +126,8 @@ class CollectionIOTest(unittest.TestCase):
                 self.assertEqual(2, len(trace))
                 self.assertEqual("response_body" if body_timeout else "response_headers", trace[0]["failure_phase"])
                 self.assertEqual(200 if body_timeout else None, trace[0]["http_status"])
-                self.assertEqual("fresh", trace[1]["connection_mode"])
+                self.assertEqual("fresh", trace[1]["session_mode"])
+                self.assertEqual("unobserved", trace[1]["connection_mode"])
                 self.assertEqual(2, trace[1]["attempt"])
                 self.assertIsNone(trace[1]["failure"])
                 self.assertIsNotNone(trace[1]["response_headers_ms"])

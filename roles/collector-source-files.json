@@ -21,6 +21,7 @@
   "docs/BTC_COLLECTOR_EVIDENCE_V1.md",
   "mappings/binance_markets.md",
   "mappings/bitbo_us_spot_etf.md",
+  "mappings/coinboss_us_spot_etf_flow.md",
   "mappings/tftc_us_spot_etf_flow.md",
   "mappings/glassnode_seller_exhaustion.md",
   "market_assets.py",

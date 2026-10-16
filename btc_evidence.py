@@ -211,7 +211,7 @@ def _build_btc_bundle(payload, report_text, report_id, generated_at, full_report
             ds["rows"] = value.get("history") or []
             ds["values"] = {k: v for k, v in value.items() if k != "history"}
             if btc_etf.is_holdings_source(record):
-                ds["formula"] = "Bitbo BTC balances; TFTC USD creations minus redemptions; complete trading-day windows"
+                ds["formula"] = "Bitbo BTC balances; published USD creations minus redemptions; complete trading-day windows"
                 ds["holdings_scope"] = record.get("holdings_scope")
                 ds["holdings_rows"] = record.get("holdings_rows")
                 ds["holding_7d_basis"] = record.get("holding_7d_basis")
@@ -223,7 +223,7 @@ def _build_btc_bundle(payload, report_text, report_id, generated_at, full_report
                 if btc_etf_flow.is_flow_source(flow) and any(
                         _number(value.get(f"flow_{days}d_usd")) for days in btc_etf_flow.WINDOWS):
                     history_sid = sid + "_history"
-                    sources[history_sid] = _source(history_sid, "TFTC US spot BTC ETF USD net flows",
+                    sources[history_sid] = _source(history_sid, flow["venue"] + " US spot BTC ETF USD net flows",
                         flow["endpoint_url"], flow["venue"], iso_time(flow.get("retrieved_at")),
                         None, {f"flow_{days}d": flow.get("source_date") for days in btc_etf_flow.WINDOWS})
                     sources[history_sid]["time_basis"] = "observation_date"
@@ -385,7 +385,8 @@ _SOURCE_CONTRACTS = {
     "public_etf": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/currentEtfDataMetrics"),
                    (btc_etf.VENUE, "bitbo.io", "/treasuries/us-etfs/")],
     "public_etf_history": [("SoSoValue", "api.sosovalue.xyz", "/openapi/v1/etf/us-btc-spot/historicalInflowChart"),
-                           (btc_etf_flow.VENUE, "www.tftc.io", "/bitcoin-etf-flows/data.json")],
+                           (btc_etf_flow.VENUE, "www.tftc.io", "/bitcoin-etf-flows/data.json"),
+                           (btc_etf_flow.COINBOSS_VENUE, "api.coinboss.com", "/api/etf/detail")],
     "public_stablecoin": [("DefiLlama", "stablecoins.llama.fi", "/stablecoins")],
     "market_current": [("Binance Spot 24hr", "api.binance.com", "/api/v3/ticker/24hr"),
                        ("Binance Spot", "api.binance.com", "/api/v3/ticker/24hr"),
@@ -1101,7 +1102,7 @@ def _etf_flow_problems(ds, source, generated):
             problems.append("flow_field_source_mismatch")
         if dates.get(f"flow_{count}d") != day or (values.get("source_date") or {}).get(f"flow_{count}d") != day:
             problems.append("flow_date_mismatch")
-        expected, reason = btc_etf_flow.window(rows, count, day)
+        expected, reason = btc_etf_flow.window(rows, count, day, source.get("venue"))
         if reason:
             problems.append(reason)
         elif not _number(observed) or not math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-6):

@@ -621,13 +621,13 @@ class BitboHoldingsContractTests(unittest.TestCase):
 
 
 class AnonymousFlowEvidenceTests(unittest.TestCase):
-    def bundle(self, version=1, no_holdings=False, missing_old_day=False):
+    def bundle(self, version=1, no_holdings=False, missing_old_day=False, venue="TFTC"):
         from pathlib import Path
         import sys
         sys.path.insert(0, str(Path(__file__).parent / "tests"))
         from collector_replay_fixture import make_payload, anonymous_etf_record, GENERATED_AT
         payload = make_payload()
-        record = anonymous_etf_record()
+        record = anonymous_etf_record(venue)
         if no_holdings:
             record["value"].update(holdings_btc=None, holding_7d_pct=None)
             record["holdings_record"] = {"status": "unavailable"}
@@ -641,6 +641,15 @@ class AnonymousFlowEvidenceTests(unittest.TestCase):
     def rehash(self, bundle):
         bundle["bundle_id"] = "btc:" + hashlib.sha256(evidence.canonical_bytes(
             {key: value for key, value in bundle.items() if key != "bundle_id"})).hexdigest()
+
+    def test_coinboss_v1_v2_reader_and_source_specific_sum_validation(self):
+        for version in (1, 2):
+            bundle = self.bundle(version, venue="CoinBoss")
+            self.assertNotIn("etf", evidence.validate_bundle(bundle, "flow-test")["dataset_reasons"])
+            result = evidence.auxiliary_observation(bundle, "flow-test")
+            self.assertEqual(36000000, result["datasets"]["etf"]["values"]["flow_30d_usd"])
+            self.assertEqual("CoinBoss", result["sources"]["public_etf_history"]["venue"])
+            self.assertEqual(0, result["independent_verified_sources"])
 
     def test_independent_sources_and_v1_v2_reader_projection(self):
         for version in (1, 2):
@@ -680,8 +689,9 @@ class AnonymousFlowEvidenceTests(unittest.TestCase):
                 lambda b: b["sources"]["public_etf_history"].update(venue="SoSoValue"),
                 lambda b: b["sources"]["public_etf_history"]["source_dates"].update(flow_1d="2026-09-02"),
                 lambda b: b["datasets"]["etf"]["values"].update(flow_1d_assets_pct=1)):
-            bundle = self.bundle(); mutation(bundle); self.rehash(bundle)
-            self.assertIn("etf", evidence.validate_bundle(bundle, "flow-test")["dataset_reasons"])
+            for venue in ("TFTC", "CoinBoss"):
+                bundle = self.bundle(venue=venue); mutation(bundle); self.rehash(bundle)
+                self.assertIn("etf", evidence.validate_bundle(bundle, "flow-test")["dataset_reasons"])
         bundle = self.bundle(missing_old_day=True)
         bundle["datasets"]["etf"]["values"]["flow_30d_usd"] = 1
         self.rehash(bundle)
