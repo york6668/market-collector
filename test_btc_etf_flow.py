@@ -20,7 +20,7 @@ class FlowTests(unittest.TestCase):
         return flow.parse_json(json.dumps(flow_response() if data is None else data))
 
     def fetch(self, data=None, html=None, failed=None):
-        def get(url):
+        def get(url, **kwargs):
             if url == failed:
                 raise requests.Timeout()
             if url == btc_etf.ENDPOINT:
@@ -94,6 +94,9 @@ class FlowTests(unittest.TestCase):
         self.assertEqual("ok", complete["status"])
         self.assertIsNotNone(bot.current_record_value(complete, "flow_30d_usd"))
         self.assertIsNotNone(bot.current_record_value(complete, "holdings_btc"))
+        complete["flow_record"]["expected_source_date"] = None
+        self.assertFalse(any("待更新" in line for line in bot.format_etf_holdings_only(complete)))
+        self.assertFalse(any("尚未更新" in note for note in bot.build_completeness({"public_records": {"etf": complete}})["snapshot_notes"]))
         no_flow = self.fetch(failed=flow.ENDPOINT)
         self.assertIsNotNone(bot.current_record_value(no_flow, "holdings_btc"))
         self.assertIsNone(bot.current_record_value(no_flow, "flow_1d_usd"))
@@ -125,6 +128,8 @@ class FlowTests(unittest.TestCase):
         self.assertIn("TFTC，截至 2026-09-02", text)
         self.assertIn(flow.PAGE, text)
         self.assertIn("Bitbo，截至 2026-09-03", text)
+        self.assertIn("应更新至 2026-09-03", text)
+        self.assertTrue(any("尚未更新至2026-09-03" in note for note in bot.build_completeness({"public_records": {"etf": mismatch}})["snapshot_notes"]))
         self.assertTrue(any("日期未对齐" in note for note in bot.build_completeness({"public_records": {"etf": mismatch}})["snapshot_notes"]))
 
     def test_revision_and_latest_flow_background_do_not_revive_old_values(self):

@@ -28,11 +28,11 @@ def page(rows=None, date="September 3, 2026"):
 
 class AnonymousHoldingsTests(unittest.TestCase):
     def fetch(self, state=None, html=None):
-        with patch.object(bot, "public_get_text", side_effect=lambda url: (html or page()) if url == etf.ENDPOINT else '{}') as get, \
+        with patch.object(bot, "public_get_text", side_effect=lambda url, **kwargs: (html or page()) if url == etf.ENDPOINT else '{}') as get, \
              patch.object(bot, "public_post_json", side_effect=AssertionError("obsolete endpoint")), \
              patch.object(bot.time, "time", return_value=NOW):
             record = bot.fetch_etf_record(state or {})
-            get.assert_any_call(etf.ENDPOINT)
+            get.assert_any_call(etf.ENDPOINT, retry_read_timeout=True)
         return record
 
     def test_full_scope_precision_and_exclusions(self):

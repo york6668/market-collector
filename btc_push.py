@@ -779,7 +779,7 @@ def public_get_json(url, params=None):
     return r.json()
 
 
-def public_get_text(url, params=None, timeout_sec=None):
+def public_get_text(url, params=None, timeout_sec=None, retry_read_timeout=False):
     headers = {
         "User-Agent": f"btcpush/{APP_ID}",
         "Accept": "text/csv,text/plain,*/*",
@@ -790,6 +790,7 @@ def public_get_text(url, params=None, timeout_sec=None):
         params=params or {},
         headers=headers,
         timeout=(3, max(1, int(timeout_sec or BINANCE_FETCH_TIMEOUT_SEC))),
+        retry_read_timeout=retry_read_timeout,
     )
     r.raise_for_status()
     return r.text
@@ -4141,7 +4142,7 @@ def _fetch_etf_holdings(state):
     source = "Bitbo US spot BTC ETF holdings"
     background = btc_etf.flow_background(state)
     try:
-        parsed = btc_etf.parse_page(public_get_text(btc_etf.ENDPOINT))
+        parsed = btc_etf.parse_page(public_get_text(btc_etf.ENDPOINT, retry_read_timeout=True))
         retrieved_at = time.time()
         if parsed["source_date"] > datetime.utcfromtimestamp(retrieved_at).date().isoformat():
             raise ValueError("future_holdings_date")
@@ -8806,6 +8807,9 @@ def build_completeness(payload):
         elif flow.get("status") == "unavailable":
             snapshot_notes.append(f"ETF流量采集失败({flow.get('reason') or 'unknown'})")
         else:
+            if flow.get("source_date") and (flow.get("expected_source_date") or "") > flow["source_date"]:
+                snapshot_notes.append(f"ETF流量尚未更新至{flow['expected_source_date']}"
+                                      f"(当前{flow['source_date']})")
             gaps = [f"{days}D" for days in btc_etf_flow.WINDOWS
                     if current_record_value(etf, f"flow_{days}d_usd") is None]
             if gaps:
@@ -9189,6 +9193,8 @@ def format_etf_holdings_only(etf):
                    for days, amount in zip(btc_etf_flow.WINDOWS, current_flows)]
         lines = ["BTC现货ETF：" + " | ".join(amounts)
                  + f"（TFTC，截至 {flow.get('source_date') or '未知日期'}）"]
+        if flow.get("source_date") and (flow.get("expected_source_date") or "") > flow["source_date"]:
+            lines.append(f"ETF流量待更新：应更新至 {flow['expected_source_date']}，当前仍截至 {flow['source_date']}")
     else:
         lines = ["BTC现货ETF：美元净流量缺失（1D/5D/30D）"]
     if any(amount is not None for amount in current_flows):

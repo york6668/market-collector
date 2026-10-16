@@ -3,6 +3,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+from urllib3.exceptions import ReadTimeoutError
 import btc_collection_io as io
 from btc_presentation import render_report, utf16_length
 
@@ -44,6 +46,75 @@ class CollectionIOTest(unittest.TestCase):
         self.assertEqual(4, peak[0])
         self.assertEqual(9, len(out))
         self.assertEqual("ZeroDivisionError", out["bad"]["collector_metrics"]["failure"])
+
+    def test_read_timeout_recovers_once_with_fresh_connection_and_retains_failure(self):
+        for body_timeout in (False, True):
+            with self.subTest(body_timeout=body_timeout):
+                pooled, fresh = Mock(), Mock()
+                response = requests.Response()
+                response.status_code = 200
+                response.headers["CF-Ray"] = "public-edge-id"
+                def failed(method, url, hooks, **kwargs):
+                    if body_timeout:
+                        hooks["response"][0](response)
+                        raise requests.ConnectionError(ReadTimeoutError(None, url, "body timeout"))
+                    raise requests.ReadTimeout()
+                def recovered(method, url, hooks, **kwargs):
+                    hooks["response"][0](response)
+                    return response
+                pooled.request.side_effect = failed
+                fresh.request.side_effect = recovered
+                with patch.object(io, "session", return_value=pooled), \
+                     patch.object(io, "_new_session", return_value=fresh), io.trace_requests() as trace:
+                    self.assertIs(response, io.get("https://example.test/data", timeout=(3, 8),
+                                                   retry_read_timeout=True))
+                self.assertEqual(1, pooled.request.call_count)
+                self.assertEqual(1, fresh.request.call_count)
+                fresh.close.assert_called_once_with()
+                pooled.close.assert_not_called()
+                self.assertEqual(2, len(trace))
+                self.assertEqual("response_body" if body_timeout else "response_headers", trace[0]["failure_phase"])
+                self.assertEqual(200 if body_timeout else None, trace[0]["http_status"])
+                self.assertEqual("fresh", trace[1]["connection_mode"])
+                self.assertEqual(2, trace[1]["attempt"])
+                self.assertIsNone(trace[1]["failure"])
+                self.assertIsNotNone(trace[1]["response_headers_ms"])
+                self.assertEqual("public-edge-id", trace[1]["response_headers"]["CF-Ray"])
+
+    def test_timeout_exhaustion_is_bounded_and_closes_recovery_session(self):
+        pooled, fresh = Mock(), Mock()
+        pooled.request.side_effect = requests.ReadTimeout()
+        fresh.request.side_effect = requests.ReadTimeout()
+        with patch.object(io, "session", return_value=pooled), \
+             patch.object(io, "_new_session", return_value=fresh), io.trace_requests() as trace:
+            with self.assertRaises(requests.ReadTimeout):
+                io.get("https://example.test/data", retry_read_timeout=True, timeout=(3, 8))
+        self.assertEqual(2, len(trace))
+        self.assertTrue(all(row["failure"] == "ReadTimeout" for row in trace))
+        self.assertEqual(1, fresh.request.call_count)
+        fresh.close.assert_called_once_with()
+
+    def test_other_failures_and_default_requests_are_not_retried(self):
+        failures = (requests.ConnectTimeout(), requests.ConnectionError(), requests.exceptions.SSLError())
+        for failure in failures:
+            fake = Mock(); fake.request.side_effect = failure
+            with patch.object(io, "session", return_value=fake), patch.object(io, "_new_session") as fresh:
+                with self.assertRaises(type(failure)):
+                    io.get("https://example.test/data", retry_read_timeout=True)
+                fresh.assert_not_called()
+        fake = Mock(); fake.request.side_effect = requests.ReadTimeout()
+        with patch.object(io, "session", return_value=fake), patch.object(io, "_new_session") as fresh:
+            with self.assertRaises(requests.ReadTimeout):
+                io.get("https://example.test/data")
+            fresh.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "requires_get"):
+                io.post("https://example.test/data", retry_read_timeout=True)
+            self.assertEqual(1, fake.request.call_count)
+        response = requests.Response(); response.status_code = 403
+        fake.request.side_effect = None; fake.request.return_value = response
+        with patch.object(io, "session", return_value=fake), patch.object(io, "_new_session") as fresh:
+            self.assertIs(response, io.get("https://example.test/data", retry_read_timeout=True))
+            fresh.assert_not_called()
 
     def test_cache_expiry_does_not_mutate_original_or_fake_timestamp(self):
         io.cache_put("market_cap", {"cap": 7}, now=100)
