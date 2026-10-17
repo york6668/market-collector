@@ -4192,7 +4192,7 @@ def _fetch_etf_flow(venue, endpoint, parser, params=None):
     flow = {"venue": venue, "endpoint_url": endpoint,
             "retrieved_at": time.time(), "status": "unavailable", "value": {}}
     try:
-        parsed = parser(public_get_text(endpoint, params=params))
+        parsed = parser(public_get_text(endpoint, params=params, retry_read_timeout=True))
         retrieved_at = time.time()
         stale, expected = btc_etf_flow.freshness(parsed["source_date"], retrieved_at,
             ETF_SOURCE_READY_ET_HOUR, ETF_SOURCE_STALE_GRACE_DAYS)
@@ -4222,18 +4222,11 @@ def fetch_etf_record(state):
     if not holding_valid:
         for key in ("holdings_btc", "holding_7d_pct", "holding_7d_status"):
             value[key] = None
-    candidates = [
-        _fetch_etf_flow(btc_etf_flow.COINBOSS_VENUE, btc_etf_flow.COINBOSS_ENDPOINT,
-                        btc_etf_flow.parse_coinboss_json, {"asset": "BTC", "days": 30}),
-        _fetch_etf_flow(btc_etf_flow.VENUE, btc_etf_flow.ENDPOINT, btc_etf_flow.parse_json),
-    ]
-    # Select one source history, never splice sources or skip a newer
-    # partial day. On equal dates prefer the anonymous per-fund CoinBoss API.
-    dated = [item for item in candidates if item.get("source_date")]
-    flow = max(dated, key=lambda item: item["source_date"]) if dated else candidates[-1]
-    record["flow_sources"] = [{k: copy.deepcopy(item.get(k)) for k in (
-        "venue", "endpoint_url", "status", "reason", "source_date", "retrieved_at")}
-        for item in candidates]
+    # Keep the stable TFTC history as the collection source. A newer partial
+    # CoinBoss row must not replace its independently validated windows.
+    flow = _fetch_etf_flow(btc_etf_flow.VENUE, btc_etf_flow.ENDPOINT, btc_etf_flow.parse_json)
+    record["flow_sources"] = [{k: copy.deepcopy(flow.get(k)) for k in (
+        "venue", "endpoint_url", "status", "reason", "source_date", "retrieved_at")}]
     if flow.get("source_date"):
         if not flow.get("source_stale"):
             value.update(flow["value"])

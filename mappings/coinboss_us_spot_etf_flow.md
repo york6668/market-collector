@@ -4,7 +4,9 @@
 
 [CoinBoss 的公开页面](https://www.coinboss.com/bitcoin-etf)说明按美元统计美国现货基金的净申购减赎回，最新基金尚未报告时留空，不能把空白解释成零。页面公开脚本直接读取匿名 JSON `https://api.coinboss.com/api/etf/detail`，参数 `asset=BTC&days=30`；无需登录、浏览器会话、API Key 或付费账号。此路径与收费 API 产品分别核实，不依赖后者的认证配置。
 
-发布方是 CoinBoss。页面标注 Farside，最新公开明细亦与 [Farside 原表](https://farside.co.uk/btc/)核对；报告注明 CoinBoss，不能把该接口写成直接访问 Farside。TFTC 继续作为独立候选来源。正常小时分别读取候选，按最新已公布日期选择一整段历史，同日优先 CoinBoss；不跨来源拼接窗口。某来源请求或结构校验失败时保留原因，可使用另一来源自身的有效日期及完整窗口。较新的不完整日不能跳过而用旧的完整日冒充当前。
+发布方是 CoinBoss。页面标注 Farside，最新公开明细亦与 [Farside 原表](https://farside.co.uk/btc/)核对；历史报告注明 CoinBoss，不能把该接口写成直接访问 Farside。当前稳定采集使用 [TFTC](tftc_us_spot_etf_flow.md)，不再请求 CoinBoss 或按较新日期优先选择它；本契约继续用于校验已经生成的 CoinBoss 附件。来源日期与待更新日期分别展示，不把较旧已公布日冒充最新交易日。
+
+例如某日缺少 IBIT、BTCO 两只基金时，1D/5D/30D 窗口全部不可用。日期较新与 HTTP 200 不足以替代完整性验证；不补零，也不以该不完整日覆盖 TFTC 自身有效且带截至日期的窗口。
 
 ## 字段及完整性
 
