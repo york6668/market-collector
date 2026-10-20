@@ -32,6 +32,8 @@ python3 roles/role_support.py status --config /absolute/collector.local.json
 
 完整恢复集合包括 BTC/QQQ/VOO 主 JSON、liquidation 和 Hyperliquid 侧车、delivery SQLite、market history SQLite，以及仍被引用的历史归档。COMMON 的快照、去重与调度记录保存在 delivery 库。归档若放在额外目录，将其加入本机配置的 `state_paths`，保留可解析引用。
 
+ETF 的 `etf_holdings`、`etf_flow` 日级观测和 `etf:*` 刷新元数据复用同一 market history SQLite，不增加数据库或调度器。首次采集会从可证明的原小时观测补入日级历史，主 JSON 和投递库不迁移、不重置。数据库恢复必须包含这些观测，才能保留跨重启的 7D 基准、流量窗口及修订获知时间；错误、缓存和来源过期状态仍按当前采集时刻重验。
+
 备份前停止所有相关写入者。helper 取得配置中的 writer lock，检查复制期间文件是否改变，在临时副本中恢复 SQLite WAL，生成独立可读的本地备份；并发写入或未恢复的 rollback journal 会明确失败。
 
 ```sh

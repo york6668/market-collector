@@ -62,11 +62,11 @@ class CollectionIOTest(unittest.TestCase):
             sock.getsockname.return_value = ("192.0.2.20", 1234)
             sock.getsockopt.side_effect = OSError("optional TCP state unavailable")
             connection.sock = sock
-            connection._last_headers_at = time.monotonic() - 3600
+            connection._last_headers_at = time.monotonic() - 30
             with patch.object(io.HTTPSConnectionPool, "_get_conn", return_value=connection):
                 pool._get_conn()
             self.assertEqual("reused", connection._collection_event["connection_mode"])
-            self.assertGreater(connection._collection_event["idle_since_headers_sec"], 3599)
+            self.assertGreater(connection._collection_event["idle_since_headers_sec"], 29)
             with patch.object(io.HTTPSConnection, "request", return_value=None):
                 connection.request("GET", "/")
             with patch.object(io.HTTPSConnection, "getresponse", side_effect=requests.ReadTimeout()):
@@ -79,6 +79,29 @@ class CollectionIOTest(unittest.TestCase):
             connection.sock = None
             pool.close()
             io._local.active_transport = previous
+
+    def test_hourly_idle_connection_is_closed_before_request_with_or_without_trace(self):
+        for traced in (False, True):
+            pool = io._ObservedHTTPSPool("example.test")
+            connection = io._ObservedHTTPSConnection("example.test")
+            sock = Mock()
+            connection.sock = sock
+            connection._last_headers_at = time.monotonic() - 3600
+            previous = getattr(io._local, "active_transport", None)
+            try:
+                io._local.active_transport = [] if traced else None
+                with patch.object(io.HTTPSConnectionPool, "_get_conn", return_value=connection):
+                    self.assertIs(connection, pool._get_conn())
+                sock.close.assert_called_once_with()
+                self.assertIsNone(connection.sock)
+                if traced:
+                    event = connection._collection_event
+                    self.assertEqual("new", event["connection_mode"])
+                    self.assertEqual("idle_expired", event["connection_reset_reason"])
+                    self.assertGreater(event["idle_since_headers_sec"], 3599)
+            finally:
+                pool.close()
+                io._local.active_transport = previous
 
     def test_adapter_observation_is_local_and_tls_failures_keep_the_actual_phase(self):
         original = poolmanager.pool_classes_by_scheme["https"]

@@ -19,17 +19,20 @@ class FlowTests(unittest.TestCase):
     def parse(self, data=None):
         return flow.parse_json(json.dumps(flow_response() if data is None else data))
 
-    def fetch(self, data=None, html=None, failed=None):
+    def fetch(self, data=None, html=None, failed=None, coinboss=None, state=None, history_path=None):
         def get(url, **kwargs):
             if url == failed:
                 raise requests.Timeout()
             if url == btc_etf.ENDPOINT:
                 return page() if html is None else html
+            if url == flow.COINBOSS_ENDPOINT:
+                self.assertEqual({"asset": "BTC", "days": 30}, kwargs["params"])
+                return json.dumps({} if coinboss is None else coinboss)
             self.assertEqual(flow.ENDPOINT, url)
             self.assertTrue(kwargs["retry_read_timeout"])
             return json.dumps(flow_response() if data is None else data)
         with patch.object(bot, "public_get_text", side_effect=get), patch.object(bot.time, "time", return_value=NOW):
-            return bot.fetch_etf_record({})
+            return bot.fetch_etf_record(state or {}, history_path)
 
     def test_precision_usd_and_complete_windows(self):
         parsed = self.parse()
@@ -169,18 +172,18 @@ class FlowTests(unittest.TestCase):
         tftc = flow_response(); tftc["days"][-1]["netFlowUsd"] += 0.1
         self.assertIsNone(self.parse(tftc)["values"]["flow_1d_usd"])
 
-    def test_stable_collection_uses_only_tftc_and_preserves_publication_lag(self):
+    def test_tftc_preserves_publication_lag_when_other_source_is_invalid(self):
         result = self.fetch(flow_response(end="2026-09-02"))
         self.assertEqual("TFTC", result["flow_record"]["venue"])
         self.assertEqual("2026-09-02", result["flow_record"]["source_date"])
         self.assertAlmostEqual(30 * 1.01234567, bot.current_record_value(result, "flow_30d_usd"))
-        self.assertEqual(["TFTC"], [item["venue"] for item in result["flow_sources"]])
+        self.assertEqual(["TFTC", "CoinBoss"], [item["venue"] for item in result["flow_sources"]])
         text = "\n".join(bot.format_etf_holdings_only(result))
         self.assertIn("TFTC，截至 2026-09-02", text)
         self.assertIn("应更新至 2026-09-03", text)
         self.assertIn(flow.PAGE, text)
 
-    def test_stable_source_failure_or_partial_latest_day_never_uses_coinboss(self):
+    def test_both_invalid_sources_preserve_failures_and_partial_windows(self):
         failed = self.fetch(failed=flow.ENDPOINT)
         self.assertEqual("Timeout", failed["flow_reason"])
         self.assertTrue(all(bot.current_record_value(failed, f"flow_{n}d_usd") is None for n in flow.WINDOWS))
@@ -190,6 +193,60 @@ class FlowTests(unittest.TestCase):
         self.assertEqual("TFTC", partial["flow_record"]["venue"])
         self.assertTrue(all(bot.current_record_value(partial, f"flow_{n}d_usd") is None for n in flow.WINDOWS))
         self.assertIsNotNone(bot.current_record_value(partial, "holdings_btc"))
+
+    def test_source_selection_requires_quality_before_date_and_keeps_whole_history(self):
+        result = self.fetch(flow_response(end="2026-09-02"), coinboss=coinboss_response())
+        self.assertEqual("CoinBoss", result["flow_record"]["venue"])
+        self.assertEqual([1200000, 6000000, 36000000],
+                         [result["value"][f"flow_{n}d_usd"] for n in flow.WINDOWS])
+        self.assertEqual("2026-09-03", result["value"]["history"][-1]["date"])
+        self.assertEqual("TFTC", self.fetch(coinboss=coinboss_response())["flow_record"]["venue"])
+        partial = coinboss_response()
+        partial["data"][partial["dates"][-1]]["IBIT"] = None
+        result = self.fetch(flow_response(end="2026-09-02"), coinboss=partial)
+        self.assertEqual("TFTC", result["flow_record"]["venue"])
+        self.assertEqual("2026-09-02", result["flow_record"]["source_date"])
+        self.assertEqual("incomplete_flow_windows", result["flow_sources"][1]["reason"])
+        # A latest 1D alone cannot displace a complete eligible source's 30D.
+        partial = coinboss_response(count=1)
+        result = self.fetch(flow_response(end="2026-09-02"), coinboss=partial)
+        self.assertEqual("TFTC", result["flow_record"]["venue"])
+
+    def test_request_failure_and_stale_primary_use_valid_secondary(self):
+        for opts in ({"failed": flow.ENDPOINT}, {"data": flow_response(end="2026-08-31")}):
+            result = self.fetch(coinboss=coinboss_response(), **opts)
+            self.assertEqual("CoinBoss", result["flow_record"]["venue"])
+            self.assertEqual(1200000, bot.current_record_value(result, "flow_1d_usd"))
+            self.assertIsNotNone(result["flow_sources"][0]["reason"])
+        result = self.fetch(failed=flow.COINBOSS_ENDPOINT)
+        self.assertEqual("TFTC", result["flow_record"]["venue"])
+
+    def test_expired_current_attempt_is_not_replaced_by_an_old_success(self):
+        old = self.fetch()
+        expired = self.fetch(flow_response(end="2026-08-31"), html=page(date="August 31, 2026"))
+        state = {"public_snapshots": [{"ts": NOW-3600, "public": {"etf": old}}]}
+        with patch.object(bot.time, "time", return_value=NOW):
+            selected = bot.select_public_records(state, {"ts": NOW, "public": {"etf": expired}})["etf"]
+        self.assertFalse(selected["snapshot_used"])
+        self.assertEqual("2026-08-31", selected["flow_record"]["source_date"])
+        notes = bot.build_completeness({"public_records": {"etf": selected}})["snapshot_notes"]
+        self.assertTrue(any("ETF流量源日期过期" in n for n in notes))
+        self.assertFalse(any("ETF流量窗口数据不足" in n for n in notes))
+
+    def test_selected_source_roundtrips_through_both_evidence_readers(self):
+        result = self.fetch(flow_response(end="2026-09-02"), coinboss=coinboss_response(),
+                            html=page(date="August 1, 2026"))
+        import market_evidence_v2
+        payload = {"public_records": {"etf": result}}
+        bundle = btc_evidence.build_bundle(payload, "ETF", "test", btc_evidence.iso_time(NOW))
+        self.assertNotIn("etf", btc_evidence.validate_bundle(bundle, "ETF")["dataset_reasons"])
+        self.assertEqual(1200000, bundle["datasets"]["etf"]["values"]["flow_1d_usd"])
+        bundle = market_evidence_v2.build_bundle(payload, "ETF", "test", btc_evidence.iso_time(NOW))
+        import collector_v2_reader
+        observed = collector_v2_reader.auxiliary_observation(bundle, "ETF")
+        self.assertNotIn("etf", observed["validation"]["dataset_reasons"])
+        self.assertEqual(1200000, observed["datasets"]["etf"]["values"]["flow_1d_usd"])
+        self.assertEqual(0, observed["independent_verified_sources"])
 
     def test_legacy_coinboss_partial_rows_remain_invalid(self):
         data = coinboss_response()

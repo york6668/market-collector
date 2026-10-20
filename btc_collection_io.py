@@ -20,6 +20,8 @@ _cache = {}
 _cache_lock = threading.RLock()
 _fetch_locks = [threading.RLock() for _ in range(32)]
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="btc-public")
+# Reuse connections within a collection burst, not across hourly idle periods.
+MAX_CONNECTION_IDLE_SEC = 60
 
 
 def _socket_addresses(sock):
@@ -103,12 +105,17 @@ class _ObservedHTTPSPool(HTTPSConnectionPool):
 
     def _get_conn(self, timeout=None):
         conn = super()._get_conn(timeout)
+        last = getattr(conn, "_last_headers_at", None)
+        idle = time.monotonic() - last if last is not None else None
+        expired = conn.sock is not None and idle is not None and idle > MAX_CONNECTION_IDLE_SEC
+        if expired:
+            conn.close()
         events = getattr(_local, "active_transport", None)
         if events is not None:
-            last = getattr(conn, "_last_headers_at", None)
             event = {"connection_mode": "reused" if conn.sock is not None else "new",
                      "phase": "connection_checkout",
-                     "idle_since_headers_sec": round(time.monotonic() - last, 3) if last is not None else None}
+                     "idle_since_headers_sec": round(idle, 3) if idle is not None else None,
+                     "connection_reset_reason": "idle_expired" if expired else None}
             if conn.sock is not None:
                 event.update(_socket_addresses(conn.sock))
             events.append(event)

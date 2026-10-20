@@ -132,7 +132,7 @@ def parse_page(text):
     return result
 
 
-def seven_day_basis(state, source_date, now, tolerance):
+def seven_day_basis(state, source_date, now):
     target_day = (datetime.strptime(source_date, "%Y-%m-%d").date() - timedelta(days=7)).isoformat()
     candidates = []
     for snap in state.get("public_snapshots") or []:
@@ -152,10 +152,9 @@ def seven_day_basis(state, source_date, now, tolerance):
             validate_holdings(record.get("holdings_scope"), record.get("holdings_rows"), amount)
         except ValueError:
             continue
-        drift = abs(stamp - (now - 7 * 86400))
-        if drift <= tolerance:
-            candidates.append((drift, -stamp, record))
-    return min(candidates, key=lambda row: row[:2])[2] if candidates else None
+        if stamp <= now:
+            candidates.append((stamp, record))
+    return max(candidates, key=lambda row: row[0])[1] if candidates else None
 
 
 def flow_background(state):

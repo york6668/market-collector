@@ -31,6 +31,7 @@ import market_observations
 import seller_exhaustion
 import btc_etf
 import btc_etf_flow
+import btc_etf_store
 import market_public
 import market_streams
 import market_common as common
@@ -2182,6 +2183,11 @@ def select_public_records(state, current_snapshot):
         if key == "liquidation" or current.get("status") == "not_applicable":
             record = dict(current) if current else make_unavailable_record(key, "no_snapshot")
             record["snapshot_used"] = False
+        elif key == "etf" and btc_etf.is_holdings_source(current):
+            # Domain-specific daily history handles cached observations. Never
+            # replace this attempt's failure/expiry with an old aggregate record.
+            record = dict(current)
+            record["snapshot_used"] = False
         elif record_has_data(current):
             record = dict(current)
             record["snapshot_used"] = False
@@ -2297,16 +2303,11 @@ def previous_us_weekday(day):
 
 
 def expected_etf_source_date(now_dt=None):
-    if not US_EASTERN_TZ:
-        return None
     now_dt = now_dt or datetime.now(TOKYO_TZ)
-    now_et = now_dt.astimezone(US_EASTERN_TZ)
-    expected_day = now_et.date()
-    if expected_day.weekday() >= 5:
-        expected_day = previous_us_weekday(expected_day)
-    elif now_et.hour < ETF_SOURCE_READY_ET_HOUR:
-        expected_day = previous_us_weekday(expected_day - timedelta(days=1))
-    return expected_day
+    try:
+        return btc_etf_flow.expected_source_date(now_dt.timestamp(), ETF_SOURCE_READY_ET_HOUR)
+    except ValueError:
+        return None
 
 
 def etf_source_stale_reason(source_date, now_dt=None):
@@ -4138,27 +4139,40 @@ def fetch_stablecoin_record():
     return record
 
 
-def _fetch_etf_holdings(state):
+def _fetch_etf_holdings(state, store=None):
     source = "Bitbo US spot BTC ETF holdings"
     background = btc_etf.flow_background(state)
+    collection_reason = None
+    parsed = None
     try:
         parsed = btc_etf.parse_page(public_get_text(btc_etf.ENDPOINT, retry_read_timeout=True))
         retrieved_at = time.time()
         if parsed["source_date"] > datetime.utcfromtimestamp(retrieved_at).date().isoformat():
             raise ValueError("future_holdings_date")
+        if store:
+            store.call("save_holdings", parsed, retrieved_at)
     except (requests.RequestException, ValueError) as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         reason = (f"http_{status}" if status is not None else
                   str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
-        record = make_unavailable_record(source, reason)
-        record.update(endpoint_url=btc_etf.ENDPOINT, venue=btc_etf.VENUE,
-                      flow_background=background)
-        return record
+        parsed = store.call("holdings", None, time.time()) if store and isinstance(exc, requests.RequestException) else None
+        if not parsed:
+            record = make_unavailable_record(source, reason)
+            record.update(endpoint_url=btc_etf.ENDPOINT, venue=btc_etf.VENUE,
+                          flow_background=background)
+            return record
+        retrieved_at = parsed["retrieved_at"]
+        collection_reason = reason
     holdings_btc = parsed["holdings_btc"]
     source_date = {"holdings": parsed["source_date"]}
     holding_7d_pct = None
-    prev = btc_etf.seven_day_basis(state, parsed["source_date"], retrieved_at,
-                                  PUBLIC_SNAPSHOT_7D_TOLERANCE_SEC)
+    prev = btc_etf.seven_day_basis(state, parsed["source_date"], time.time())
+    if store:
+        day = (datetime.strptime(parsed["source_date"], "%Y-%m-%d") - timedelta(days=7)).date().isoformat()
+        basis = store.call("holdings", day, time.time())
+        if basis:
+            prev = {**basis, "venue": btc_etf.VENUE, "endpoint_url": btc_etf.ENDPOINT,
+                    "value": {"holdings_btc": basis["holdings_btc"], "source_date": {"holdings": basis["source_date"]}}}
     if prev:
         holding_7d_pct = pct(holdings_btc, prev["value"]["holdings_btc"])
     holding_7d_status = "ok" if holding_7d_pct is not None else "collecting"
@@ -4172,12 +4186,13 @@ def _fetch_etf_holdings(state):
         "holding_7d_reason": None if holding_7d_status == "ok" else "need_7d_snapshot",
         "source_date": source_date,
     }
-    record = make_data_record(value, source, status="ok")
-    stale_reason = etf_source_stale_reason(parsed["source_date"], datetime.fromtimestamp(retrieved_at, TOKYO_TZ))
+    record = make_data_record(value, source, status="partial" if collection_reason else "ok", reason=collection_reason)
+    stale_reason = etf_source_stale_reason(parsed["source_date"], datetime.fromtimestamp(time.time(), TOKYO_TZ))
     record.update(endpoint_url=btc_etf.ENDPOINT, venue=btc_etf.VENUE,
                   source_as_of_ms=None, retrieved_at=retrieved_at, time_basis="observation_date",
                   source_date=source_date, source_stale=bool(stale_reason),
                   source_stale_reason=stale_reason,
+                  cache_used=bool(collection_reason), collection_reason=collection_reason,
                   flow_background=background, holdings_scope=parsed["holdings_scope"],
                   holdings_rows=parsed["holdings_rows"])
     if holding_7d_pct is not None:
@@ -4188,13 +4203,22 @@ def _fetch_etf_holdings(state):
     return record
 
 
-def _fetch_etf_flow(venue, endpoint, parser, params=None):
+def _fetch_etf_flow(venue, endpoint, parser, params=None, store=None):
     flow = {"venue": venue, "endpoint_url": endpoint,
             "retrieved_at": time.time(), "status": "unavailable", "value": {}}
     try:
         parsed = parser(public_get_text(endpoint, params=params, retry_read_timeout=True))
         retrieved_at = time.time()
-        stale, expected = btc_etf_flow.freshness(parsed["source_date"], retrieved_at,
+    except (requests.RequestException, ValueError) as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        flow["reason"] = f"http_{code}" if code is not None else str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        parsed = store.call("flow", venue, time.time()) if store and isinstance(exc, requests.RequestException) else None
+        if not parsed:
+            return flow
+        retrieved_at = parsed["retrieved_at"]
+        flow.update(cache_used=True, collection_reason=flow["reason"])
+    try:
+        stale, expected = btc_etf_flow.freshness(parsed["source_date"], time.time(),
             ETF_SOURCE_READY_ET_HOUR, ETF_SOURCE_STALE_GRACE_DAYS)
         if stale in ("future_flow_date", "flow_session_not_closed", "flow_calendar_year_unverified", "flow_non_trading_date"):
             raise ValueError(stale)
@@ -4204,29 +4228,51 @@ def _fetch_etf_flow(venue, endpoint, parser, params=None):
                     window_quality=parsed["window_quality"], history=parsed["history"],
                     value=copy.deepcopy(parsed["values"]))
         complete = all(v is not None for v in parsed["values"].values())
-        flow.update(status="unavailable" if stale else "ok" if complete else "partial",
-                    reason=stale or (None if complete else "incomplete_flow_windows"))
-    except (requests.RequestException, ValueError) as exc:
-        code = getattr(getattr(exc, "response", None), "status_code", None)
-        flow["reason"] = f"http_{code}" if code is not None else str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        flow.update(status="unavailable" if stale else "ok" if complete and not flow.get("cache_used") else "partial",
+                    reason=stale or flow.get("collection_reason") or (None if complete else "incomplete_flow_windows"))
+        if store and not flow.get("cache_used"):
+            store.call("save_flow", flow)
+    except ValueError as exc:
+        flow["reason"] = str(exc)
     return flow
 
 
-def fetch_etf_record(state):
-    record = _fetch_etf_holdings(state)
+def fetch_etf_record(state, history_path=None):
+    store, storage_reason = None, None
+    if history_path:
+        try:
+            store = btc_etf_store.ETFStore(history_path)
+            store.call("seed", state)
+        except (sqlite3.Error, OSError) as exc:
+            storage_reason = type(exc).__name__
+    try:
+        record = _collect_etf_record(state, store)
+        record["daily_store_reason"] = storage_reason or (",".join(sorted(set(store.errors))) if store and store.errors else None)
+        return record
+    finally:
+        if store:
+            store.close()
+
+
+def _collect_etf_record(state, store):
+    record = _fetch_etf_holdings(state, store)
     holding_valid = record_is_current(record)
     record["holdings_record"] = {key: copy.deepcopy(record.get(key)) for key in (
-        "status", "reason", "value", "source_stale", "source_stale_reason", "retrieved_at")}
+        "status", "reason", "value", "source_stale", "source_stale_reason", "retrieved_at", "cache_used", "collection_reason")}
     value = copy.deepcopy(record.get("value") or {key: None for key in btc_etf.FLOW_FIELDS})
     value.setdefault("source_date", {})
     if not holding_valid:
         for key in ("holdings_btc", "holding_7d_pct", "holding_7d_status"):
             value[key] = None
-    # Keep the stable TFTC history as the collection source. A newer partial
-    # CoinBoss row must not replace its independently validated windows.
-    flow = _fetch_etf_flow(btc_etf_flow.VENUE, btc_etf_flow.ENDPOINT, btc_etf_flow.parse_json)
-    record["flow_sources"] = [{k: copy.deepcopy(flow.get(k)) for k in (
-        "venue", "endpoint_url", "status", "reason", "source_date", "retrieved_at")}]
+    flows = [
+        _fetch_etf_flow(btc_etf_flow.VENUE, btc_etf_flow.ENDPOINT, btc_etf_flow.parse_json, store=store),
+        _fetch_etf_flow(btc_etf_flow.COINBOSS_VENUE, btc_etf_flow.COINBOSS_ENDPOINT,
+                       btc_etf_flow.parse_coinboss_json, params={"asset": "BTC", "days": 30}, store=store),
+    ]
+    flow = btc_etf_flow.select_source(flows)
+    record["flow_sources"] = [{k: copy.deepcopy(candidate.get(k)) for k in (
+        "venue", "endpoint_url", "status", "reason", "source_date", "retrieved_at", "window_quality",
+        "source_stale", "expected_source_date", "cache_used", "collection_reason")} for candidate in flows]
     if flow.get("source_date"):
         if not flow.get("source_stale"):
             value.update(flow["value"])
@@ -4235,11 +4281,12 @@ def fetch_etf_record(state):
     flow_valid = any(value.get(f"flow_{days}d_usd") is not None for days in btc_etf_flow.WINDOWS)
     record.update(value=value, flow_record=flow, flow_status=flow["status"], flow_reason=flow.get("reason"),
                   source_date=value["source_date"], updated_at=time.time(),
-                  status="ok" if holding_valid and flow["status"] == "ok" else "partial" if holding_valid or flow_valid else "unavailable",
+                  status="ok" if holding_valid and record["status"] == "ok" and flow["status"] == "ok" else "partial" if holding_valid or flow_valid else "unavailable",
                   source_stale=False if holding_valid or flow_valid else record.get("source_stale", False),
                   source_stale_reason=None if holding_valid or flow_valid else record.get("source_stale_reason"))
+    holding_reason = record["holdings_record"].get("reason") or record["holdings_record"].get("source_stale_reason")
     record["reason"] = None if record["status"] == "ok" else (
-        flow.get("reason") if holding_valid else record["holdings_record"].get("reason") or record["holdings_record"].get("source_stale_reason"))
+        (flow.get("reason") or holding_reason) if holding_valid else (holding_reason or flow.get("reason")))
     return record
 
 
@@ -4324,7 +4371,7 @@ def collect_public_snapshot(state):
         "basis": fetch_basis_record,
         "hyperliquid_funding": fetch_hyperliquid_funding_record,
         "hyperliquid_basis": lambda: fetch_hyperliquid_basis_record(hl),
-        "etf": lambda: fetch_etf_record(state),
+        "etf": lambda: fetch_etf_record(state, market_history.history_path(STATE_FILE)),
         "spot_cvd": fetch_spot_cvd_record,
         "stablecoin": fetch_stablecoin_record,
         "macro": lambda: fetch_macro_record(macro),
@@ -8812,7 +8859,7 @@ def build_completeness(payload):
     if btc_etf.is_holdings_source(etf or {}) and etf.get("flow_record"):
         flow = etf["flow_record"]
         if flow.get("source_stale"):
-            snapshot_notes.append(f"ETF流量源日期过期({flow.get('source_date') or '未知'})")
+            snapshot_notes.append(f"ETF流量源日期过期({flow.get('source_date') or '未知'}；应更新至{flow.get('expected_source_date') or '未知'})")
         elif flow.get("status") == "unavailable":
             snapshot_notes.append(f"ETF流量采集失败({flow.get('reason') or 'unknown'})")
         else:
@@ -8823,11 +8870,17 @@ def build_completeness(payload):
                     if current_record_value(etf, f"flow_{days}d_usd") is None]
             if gaps:
                 snapshot_notes.append("ETF流量窗口数据不足(" + "/".join(gaps) + ")")
+        if flow.get("collection_reason"):
+            snapshot_notes.append(f"ETF流量本轮采集失败({flow['collection_reason']})；沿用带原日期的日级观测")
         holding = etf.get("holdings_record") or {}
         if holding.get("source_stale"):
             snapshot_notes.append("ETF持仓源日期过期")
         elif holding.get("status") == "unavailable":
             snapshot_notes.append(f"ETF持仓采集失败({holding.get('reason') or 'unknown'})")
+        if holding.get("collection_reason"):
+            snapshot_notes.append(f"ETF持仓本轮采集失败({holding['collection_reason']})；沿用带原日期的日级观测")
+        if etf.get("daily_store_reason"):
+            snapshot_notes.append(f"ETF日级存储失败({etf['daily_store_reason']})")
         dates = record_value(etf, "source_date") or {}
         if (current_record_value(etf, "holdings_btc") is not None
                 and current_record_value(etf, "flow_1d_usd") is not None

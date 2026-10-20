@@ -91,7 +91,7 @@ class AnonymousHoldingsTests(unittest.TestCase):
         record = holdings_only_record("2026-08-27", NOW - 7 * 86400, amount)
         return {"public_snapshots": [{"ts": NOW - 7 * 86400, "public": {"etf": record}}]}
 
-    def test_seven_day_basis_same_source_scope_date_and_valid_coverage(self):
+    def test_seven_day_basis_uses_source_date_and_latest_known_revision(self):
         record = self.fetch(self.baseline())
         self.assertAlmostEqual(0.000001, record["value"]["holding_7d_pct"])
         self.assertEqual("ok", record["value"]["holding_7d_status"])
@@ -105,7 +105,7 @@ class AnonymousHoldingsTests(unittest.TestCase):
             self.assertEqual("collecting", self.fetch(state)["value"]["holding_7d_status"])
         for delta in (-86400, 86400):
             state = self.baseline(); state["public_snapshots"][0]["ts"] += delta
-            self.assertIsNone(self.fetch(state)["value"]["holding_7d_pct"])
+            self.assertIsNotNone(self.fetch(state)["value"]["holding_7d_pct"])
         state = self.baseline()
         state["public_snapshots"][0]["public"]["etf"]["value"]["source_date"]["holdings"] = "2026-08-26"
         self.assertIsNone(self.fetch(state)["value"]["holding_7d_pct"])

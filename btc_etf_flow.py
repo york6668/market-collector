@@ -16,6 +16,16 @@ COINBOSS_VENUE = "CoinBoss"
 WINDOWS = (1, 5, 30)
 
 
+def select_source(records):
+    """Prefer complete usable histories, then date; never splice sources."""
+    def rank(record):
+        count = sum(_number((record.get("value") or {}).get(f"flow_{days}d_usd")) for days in WINDOWS)
+        usable = record.get("status") in ("ok", "partial") and not record.get("source_stale") and count > 0
+        return (usable, count == len(WINDOWS), count,
+                record.get("source_date") or "", not record.get("cache_used"), record.get("venue") == VENUE)
+    return max(records, key=rank)
+
+
 def is_flow_source(record):
     return (record.get("venue"), record.get("endpoint_url")) in (
         (VENUE, ENDPOINT), (COINBOSS_VENUE, COINBOSS_ENDPOINT))
@@ -184,6 +194,19 @@ def parse_coinboss_json(text):
     return _parsed(rows, order[-1], COINBOSS_VENUE)
 
 
+def expected_source_date(now, ready_hour=20):
+    """Expected published session, shared by both daily ETF domains."""
+    import market_assets
+    local = datetime.fromtimestamp(now, market_assets.ET)
+    expected = local.date() - timedelta(days=1 if local.hour < ready_hour else 0)
+    while True:
+        if expected.year not in market_assets._HOLIDAYS:
+            raise ValueError("flow_calendar_year_unverified")
+        if market_assets.trading_day(expected):
+            return expected
+        expected -= timedelta(days=1)
+
+
 def freshness(day, now, ready_hour=20, grace_days=1):
     """Use the existing publication grace, with known NYSE holidays respected."""
     import market_assets
@@ -194,13 +217,10 @@ def freshness(day, now, ready_hour=20, grace_days=1):
     close_minute = 780 if local.strftime("%m-%d") in market_assets._EARLY.get(local.year, "").split() else 960
     if observed == local.date() and local.hour * 60 + local.minute < close_minute:
         return "flow_session_not_closed", None
-    expected = local.date() - timedelta(days=1 if local.hour < ready_hour else 0)
-    while True:
-        if expected.year not in market_assets._HOLIDAYS:
-            return "flow_calendar_year_unverified", None
-        if market_assets.trading_day(expected):
-            break
-        expected -= timedelta(days=1)
+    try:
+        expected = expected_source_date(now, ready_hour)
+    except ValueError as exc:
+        return str(exc), None
     if not market_assets.trading_day(observed):
         return "flow_non_trading_date", expected.isoformat()
     lag = (expected - observed).days
