@@ -272,7 +272,7 @@ class StateStoreTest(unittest.TestCase):
     def test_default_production_migration_rejects_old_daemon_and_scan_failure(self):
         import btc_push as bot
         production_path = os.path.expanduser("~/.btc_push_state_tokyo.json")
-        listing = type("ProcessListing", (), {"stdout": "999999 python3 /Users/york/scripts/btc_push.py\n"})()
+        listing = type("ProcessListing", (), {"stdout": "999999 python3 /synthetic/collector/btc_push.py\n"})()
         with patch.object(bot, "STATE_FILE", production_path), patch.object(bot.subprocess, "run", return_value=listing):
             with self.assertRaisesRegex(RuntimeError, "stopped BTC collectors"):
                 bot.assert_migration_daemon_stopped()

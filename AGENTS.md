@@ -2,7 +2,7 @@
 
 本仓维护行情采集、机械指标、质量记录、简报、证据附件、投递和状态恢复。先读 [README.md](README.md)，具体采集契约和本机运行说明见 [roles/COLLECTOR_DEPLOYMENT.md](roles/COLLECTOR_DEPLOYMENT.md)。
 
-- 通用用户偏好和 York Skills 统一读取私有仓库 [codex-framework](https://github.com/york6668/codex-framework) 的 `york-worktree/Codex框架共享` 发布分支，从其 `AGENTS.md` 进入。本仓只引用该框架；按当前环境发现已安装或检出的框架位置，不假定另一台设备的路径可访问。
+- 通用用户偏好和 York Skills 统一读取共享仓库 [codex-framework](https://github.com/york6668/codex-framework) 的 `york-worktree/Codex框架共享` 发布分支，从其 `AGENTS.md` 进入。本仓只引用该框架；按当前环境发现已安装或检出的框架位置，不假定另一台设备的路径可访问。
 - 采集专属契约保留在本仓的 `mappings/`、`docs/` 和实际代码中；Markdown 供模型理解，程序不解析这些说明。
 - 保留 BTC/QQQ/VOO 独立身份、COMMON 规则、证据 V1/V2、来源代理与质量降级语义。附件校验通过不代表独立来源已核验，最新附件无效不能用旧报告冒充最新。
 - `UNKNOWN` 投递不自动重发。恢复保留历史、游标、已完成报告和未知回执；数据、凭据及实际机器配置留在本机。

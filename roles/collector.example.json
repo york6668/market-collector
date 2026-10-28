@@ -5,7 +5,7 @@
   "code_dir": "/absolute/market-collector",
   "entrypoint": "btc_push.py",
   "arguments": [],
-  "service_label": "com.york.btcpush",
+  "service_label": "local.example.market-collector",
   "log_dir": "/absolute/local-market/logs",
   "private_environment_file": "/absolute/local-market/private-environment.json",
   "environment": {
